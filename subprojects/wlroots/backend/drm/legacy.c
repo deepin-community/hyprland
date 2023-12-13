@@ -4,6 +4,7 @@
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 #include "backend/drm/drm.h"
+#include "backend/drm/fb.h"
 #include "backend/drm/iface.h"
 #include "backend/drm/util.h"
 
@@ -59,7 +60,7 @@ static bool legacy_crtc_test(struct wlr_drm_connector *conn,
 
 static bool legacy_crtc_commit(struct wlr_drm_connector *conn,
 		const struct wlr_drm_connector_state *state,
-		uint32_t flags, bool test_only) {
+		struct wlr_drm_page_flip *page_flip, uint32_t flags, bool test_only) {
 	if (!legacy_crtc_test(conn, state)) {
 		return false;
 	}
@@ -175,13 +176,7 @@ static bool legacy_crtc_commit(struct wlr_drm_connector *conn,
 	}
 
 	if (flags & DRM_MODE_PAGE_FLIP_EVENT) {
-		uint32_t page_flags = DRM_MODE_PAGE_FLIP_EVENT;
-		if (flags & DRM_MODE_PAGE_FLIP_ASYNC) {
-			page_flags |= DRM_MODE_PAGE_FLIP_ASYNC;
-		}
-
-		if (drmModePageFlip(drm->fd, crtc->id, fb_id,
-				page_flags, drm)) {
+		if (drmModePageFlip(drm->fd, crtc->id, fb_id, flags, page_flip)) {
 			wlr_drm_conn_log_errno(conn, WLR_ERROR, "drmModePageFlip failed");
 			return false;
 		}

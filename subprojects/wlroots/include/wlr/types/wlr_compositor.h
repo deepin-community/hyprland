@@ -190,7 +190,12 @@ struct wlr_surface {
 		 */
 		struct wl_signal unmap;
 
-		struct wl_signal new_subsurface;
+		/**
+		 * Note: unlike other new_* signals, new_subsurface is emitted when
+		 * the subsurface is added to the parent surface's current state,
+		 * not when the object is created.
+		 */
+		struct wl_signal new_subsurface; // struct wlr_subsurface
 		struct wl_signal destroy;
 	} events;
 
@@ -210,6 +215,8 @@ struct wlr_surface {
 		int width, height;
 		int buffer_width, buffer_height;
 	} previous;
+
+	bool unmap_commit;
 
 	bool opaque;
 	bool has_buffer;
@@ -411,6 +418,11 @@ void wlr_surface_set_preferred_buffer_scale(struct wlr_surface *surface,
  */
 void wlr_surface_set_preferred_buffer_transform(struct wlr_surface *surface,
 	enum wl_output_transform transform);
+
+/**
+ * Get a Pixman region from a wl_region resource.
+ */
+const pixman_region32_t *wlr_region_from_resource(struct wl_resource *resource);
 
 /**
  * Create the wl_compositor global, which can be used by clients to create

@@ -26,6 +26,8 @@ struct wlr_xdg_shell {
 
 	struct {
 		struct wl_signal new_surface; // struct wlr_xdg_surface
+		struct wl_signal new_toplevel; // struct wlr_xdg_toplevel
+		struct wl_signal new_popup; // struct wlr_xdg_popup
 		struct wl_signal destroy;
 	} events;
 
@@ -102,6 +104,8 @@ struct wlr_xdg_popup {
 	struct wlr_xdg_popup_state current, pending;
 
 	struct {
+		struct wl_signal destroy;
+
 		struct wl_signal reposition;
 	} events;
 
@@ -184,6 +188,8 @@ struct wlr_xdg_toplevel {
 	char *app_id;
 
 	struct {
+		struct wl_signal destroy;
+
 		// Note: as per xdg-shell protocol, the compositor has to
 		// handle state requests by sending a configure event,
 		// even if it didn't actually change the state. Therefore,
@@ -249,7 +255,7 @@ struct wlr_xdg_surface {
 
 	struct wl_list popups; // wlr_xdg_popup.link
 
-	bool added, configured;
+	bool configured;
 	struct wl_event_source *configure_idle;
 	uint32_t scheduled_serial;
 	struct wl_list configure_list;
@@ -275,7 +281,6 @@ struct wlr_xdg_surface {
 
 	// private state
 
-	bool client_mapped;
 	struct wl_listener role_resource_destroy;
 };
 
@@ -485,6 +490,24 @@ struct wlr_surface *wlr_xdg_surface_popup_surface_at(
  * if the xdg_surface has been destroyed.
  */
 struct wlr_xdg_surface *wlr_xdg_surface_try_from_wlr_surface(struct wlr_surface *surface);
+
+/**
+ * Get a struct wlr_xdg_toplevel from a struct wlr_surface.
+ *
+ * Returns NULL if the surface doesn't have the xdg_surface role, the
+ * xdg_surface is not a toplevel, or the xdg_surface/xdg_toplevel objects have
+ * been destroyed.
+ */
+struct wlr_xdg_toplevel *wlr_xdg_toplevel_try_from_wlr_surface(struct wlr_surface *surface);
+
+/**
+ * Get a struct wlr_xdg_popup from a struct wlr_surface.
+ *
+ * Returns NULL if the surface doesn't have the xdg_surface role, the
+ * xdg_surface is not a popup, or the xdg_surface/xdg_popup objects have
+ * been destroyed.
+ */
+struct wlr_xdg_popup *wlr_xdg_popup_try_from_wlr_surface(struct wlr_surface *surface);
 
 /**
  * Get the surface geometry.

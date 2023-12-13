@@ -28,13 +28,6 @@
 #include "tex_rgbx_frag_src.h"
 #include "tex_external_frag_src.h"
 
-static const GLfloat verts[] = {
-	1, 0, // top right
-	0, 0, // top left
-	1, 1, // bottom right
-	0, 1, // bottom left
-};
-
 static const struct wlr_renderer_impl renderer_impl;
 static const struct wlr_render_timer_impl render_timer_impl;
 
@@ -79,6 +72,7 @@ static void destroy_buffer(struct wlr_gles2_buffer *buffer) {
 
 	glDeleteFramebuffers(1, &buffer->fbo);
 	glDeleteRenderbuffers(1, &buffer->rbo);
+	glDeleteTextures(1, &buffer->tex);
 
 	pop_gles2_debug(buffer->renderer);
 
@@ -100,7 +94,45 @@ static const struct wlr_addon_interface buffer_addon_impl = {
 	.destroy = handle_buffer_destroy,
 };
 
-static struct wlr_gles2_buffer *get_or_create_buffer(struct wlr_gles2_renderer *renderer,
+GLuint gles2_buffer_get_fbo(struct wlr_gles2_buffer *buffer) {
+	if (buffer->external_only) {
+		wlr_log(WLR_ERROR, "DMA-BUF format is external-only");
+		return 0;
+	}
+
+	if (buffer->fbo) {
+		return buffer->fbo;
+	}
+
+	push_gles2_debug(buffer->renderer);
+
+	if (!buffer->rbo) {
+		glGenRenderbuffers(1, &buffer->rbo);
+		glBindRenderbuffer(GL_RENDERBUFFER, buffer->rbo);
+		buffer->renderer->procs.glEGLImageTargetRenderbufferStorageOES(GL_RENDERBUFFER,
+			buffer->image);
+		glBindRenderbuffer(GL_RENDERBUFFER, 0);
+	}
+
+	glGenFramebuffers(1, &buffer->fbo);
+	glBindFramebuffer(GL_FRAMEBUFFER, buffer->fbo);
+	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+		GL_RENDERBUFFER, buffer->rbo);
+	GLenum fb_status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+	if (fb_status != GL_FRAMEBUFFER_COMPLETE) {
+		wlr_log(WLR_ERROR, "Failed to create FBO");
+		glDeleteFramebuffers(1, &buffer->fbo);
+		buffer->fbo = 0;
+	}
+
+	pop_gles2_debug(buffer->renderer);
+
+	return buffer->fbo;
+}
+
+struct wlr_gles2_buffer *gles2_buffer_get_or_create(struct wlr_gles2_renderer *renderer,
 		struct wlr_buffer *wlr_buffer) {
 	struct wlr_addon *addon =
 		wlr_addon_find(&wlr_buffer->addons, renderer, &buffer_addon_impl);
@@ -122,33 +154,10 @@ static struct wlr_gles2_buffer *get_or_create_buffer(struct wlr_gles2_renderer *
 		goto error_buffer;
 	}
 
-	bool external_only;
 	buffer->image = wlr_egl_create_image_from_dmabuf(renderer->egl,
-		&dmabuf, &external_only);
+		&dmabuf, &buffer->external_only);
 	if (buffer->image == EGL_NO_IMAGE_KHR) {
 		goto error_buffer;
-	}
-
-	push_gles2_debug(renderer);
-
-	glGenRenderbuffers(1, &buffer->rbo);
-	glBindRenderbuffer(GL_RENDERBUFFER, buffer->rbo);
-	renderer->procs.glEGLImageTargetRenderbufferStorageOES(GL_RENDERBUFFER,
-		buffer->image);
-	glBindRenderbuffer(GL_RENDERBUFFER, 0);
-
-	glGenFramebuffers(1, &buffer->fbo);
-	glBindFramebuffer(GL_FRAMEBUFFER, buffer->fbo);
-	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-		GL_RENDERBUFFER, buffer->rbo);
-	GLenum fb_status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
-
-	pop_gles2_debug(renderer);
-
-	if (fb_status != GL_FRAMEBUFFER_COMPLETE) {
-		wlr_log(WLR_ERROR, "Failed to create FBO");
-		goto error_image;
 	}
 
 	wlr_addon_init(&buffer->addon, &wlr_buffer->addons, renderer,
@@ -161,8 +170,6 @@ static struct wlr_gles2_buffer *get_or_create_buffer(struct wlr_gles2_renderer *
 
 	return buffer;
 
-error_image:
-	wlr_egl_destroy_image(renderer->egl, buffer->image);
 error_buffer:
 	free(buffer);
 	return NULL;
@@ -191,7 +198,12 @@ static bool gles2_bind_buffer(struct wlr_renderer *wlr_renderer,
 
 	wlr_egl_make_current(renderer->egl);
 
-	struct wlr_gles2_buffer *buffer = get_or_create_buffer(renderer, wlr_buffer);
+	GLint fbo = gles2_buffer_get_fbo(renderer->current_buffer);
+	if (!fbo) {
+		return false;
+	}
+
+	struct wlr_gles2_buffer *buffer = gles2_buffer_get_or_create(renderer, wlr_buffer);
 	if (buffer == NULL) {
 		return false;
 	}
@@ -200,7 +212,7 @@ static bool gles2_bind_buffer(struct wlr_renderer *wlr_renderer,
 	renderer->current_buffer = buffer;
 
 	push_gles2_debug(renderer);
-	glBindFramebuffer(GL_FRAMEBUFFER, renderer->current_buffer->fbo);
+	glBindFramebuffer(GL_FRAMEBUFFER, fbo);
 	pop_gles2_debug(renderer);
 
 	return true;
@@ -256,139 +268,6 @@ static bool gles2_begin(struct wlr_renderer *wlr_renderer, uint32_t width,
 static void gles2_end(struct wlr_renderer *wlr_renderer) {
 	gles2_get_renderer_in_context(wlr_renderer);
 	// no-op
-}
-
-static void gles2_clear(struct wlr_renderer *wlr_renderer,
-		const float color[static 4]) {
-	struct wlr_gles2_renderer *renderer =
-		gles2_get_renderer_in_context(wlr_renderer);
-
-	push_gles2_debug(renderer);
-	glClearColor(color[0], color[1], color[2], color[3]);
-	glClear(GL_COLOR_BUFFER_BIT);
-	pop_gles2_debug(renderer);
-}
-
-static void gles2_scissor(struct wlr_renderer *wlr_renderer,
-		struct wlr_box *box) {
-	struct wlr_gles2_renderer *renderer =
-		gles2_get_renderer_in_context(wlr_renderer);
-
-	push_gles2_debug(renderer);
-	if (box != NULL) {
-		glScissor(box->x, box->y, box->width, box->height);
-		glEnable(GL_SCISSOR_TEST);
-	} else {
-		glDisable(GL_SCISSOR_TEST);
-	}
-	pop_gles2_debug(renderer);
-}
-
-static bool gles2_render_subtexture_with_matrix(
-		struct wlr_renderer *wlr_renderer, struct wlr_texture *wlr_texture,
-		const struct wlr_fbox *box, const float matrix[static 9],
-		float alpha) {
-	struct wlr_gles2_renderer *renderer =
-		gles2_get_renderer_in_context(wlr_renderer);
-	struct wlr_gles2_texture *texture =
-		gles2_get_texture(wlr_texture);
-	assert(texture->renderer == renderer);
-
-	struct wlr_gles2_tex_shader *shader = NULL;
-
-	switch (texture->target) {
-	case GL_TEXTURE_2D:
-		if (texture->has_alpha) {
-			shader = &renderer->shaders.tex_rgba;
-		} else {
-			shader = &renderer->shaders.tex_rgbx;
-		}
-		break;
-	case GL_TEXTURE_EXTERNAL_OES:
-		// EGL_EXT_image_dma_buf_import_modifiers requires
-		// GL_OES_EGL_image_external
-		assert(renderer->exts.OES_egl_image_external);
-		shader = &renderer->shaders.tex_ext;
-		break;
-	default:
-		abort();
-	}
-
-	float gl_matrix[9];
-	wlr_matrix_multiply(gl_matrix, renderer->projection, matrix);
-
-	push_gles2_debug(renderer);
-
-	if (!texture->has_alpha && alpha == 1.0) {
-		glDisable(GL_BLEND);
-	} else {
-		glEnable(GL_BLEND);
-	}
-
-	glActiveTexture(GL_TEXTURE0);
-	glBindTexture(texture->target, texture->tex);
-
-	glTexParameteri(texture->target, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-
-	glUseProgram(shader->program);
-
-	glUniformMatrix3fv(shader->proj, 1, GL_FALSE, gl_matrix);
-	glUniform1i(shader->tex, 0);
-	glUniform1f(shader->alpha, alpha);
-
-	float tex_matrix[9];
-	wlr_matrix_identity(tex_matrix);
-	wlr_matrix_translate(tex_matrix, box->x / texture->wlr_texture.width,
-		box->y / texture->wlr_texture.height);
-	wlr_matrix_scale(tex_matrix, box->width / texture->wlr_texture.width,
-		box->height / texture->wlr_texture.height);
-	glUniformMatrix3fv(shader->tex_proj, 1, GL_FALSE, tex_matrix);
-
-	glVertexAttribPointer(shader->pos_attrib, 2, GL_FLOAT, GL_FALSE, 0, verts);
-
-	glEnableVertexAttribArray(shader->pos_attrib);
-
-	glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-
-	glDisableVertexAttribArray(shader->pos_attrib);
-
-	glBindTexture(texture->target, 0);
-
-	pop_gles2_debug(renderer);
-	return true;
-}
-
-static void gles2_render_quad_with_matrix(struct wlr_renderer *wlr_renderer,
-		const float color[static 4], const float matrix[static 9]) {
-	struct wlr_gles2_renderer *renderer =
-		gles2_get_renderer_in_context(wlr_renderer);
-
-	float gl_matrix[9];
-	wlr_matrix_multiply(gl_matrix, renderer->projection, matrix);
-
-	push_gles2_debug(renderer);
-
-	if (color[3] == 1.0) {
-		glDisable(GL_BLEND);
-	} else {
-		glEnable(GL_BLEND);
-	}
-
-	glUseProgram(renderer->shaders.quad.program);
-
-	glUniformMatrix3fv(renderer->shaders.quad.proj, 1, GL_FALSE, gl_matrix);
-	glUniform4f(renderer->shaders.quad.color, color[0], color[1], color[2], color[3]);
-
-	glVertexAttribPointer(renderer->shaders.quad.pos_attrib, 2, GL_FLOAT, GL_FALSE,
-			0, verts);
-
-	glEnableVertexAttribArray(renderer->shaders.quad.pos_attrib);
-
-	glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-
-	glDisableVertexAttribArray(renderer->shaders.quad.pos_attrib);
-
-	pop_gles2_debug(renderer);
 }
 
 static const uint32_t *gles2_get_shm_texture_formats(
@@ -519,14 +398,14 @@ static void gles2_destroy(struct wlr_renderer *wlr_renderer) {
 
 	wlr_egl_make_current(renderer->egl);
 
-	struct wlr_gles2_buffer *buffer, *buffer_tmp;
-	wl_list_for_each_safe(buffer, buffer_tmp, &renderer->buffers, link) {
-		destroy_buffer(buffer);
-	}
-
 	struct wlr_gles2_texture *tex, *tex_tmp;
 	wl_list_for_each_safe(tex, tex_tmp, &renderer->textures, link) {
 		gles2_texture_destroy(tex);
+	}
+
+	struct wlr_gles2_buffer *buffer, *buffer_tmp;
+	wl_list_for_each_safe(buffer, buffer_tmp, &renderer->buffers, link) {
+		destroy_buffer(buffer);
 	}
 
 	push_gles2_debug(renderer);
@@ -554,6 +433,9 @@ static void gles2_destroy(struct wlr_renderer *wlr_renderer) {
 static struct wlr_render_pass *gles2_begin_buffer_pass(struct wlr_renderer *wlr_renderer,
 		struct wlr_buffer *wlr_buffer, const struct wlr_buffer_pass_options *options) {
 	struct wlr_gles2_renderer *renderer = gles2_get_renderer(wlr_renderer);
+
+	struct wlr_egl_context prev_ctx = {0};
+	wlr_egl_save_context(&prev_ctx);
 	if (!wlr_egl_make_current(renderer->egl)) {
 		return NULL;
 	}
@@ -564,12 +446,12 @@ static struct wlr_render_pass *gles2_begin_buffer_pass(struct wlr_renderer *wlr_
 		clock_gettime(CLOCK_MONOTONIC, &timer->cpu_start);
 	}
 
-	struct wlr_gles2_buffer *buffer = get_or_create_buffer(renderer, wlr_buffer);
+	struct wlr_gles2_buffer *buffer = gles2_buffer_get_or_create(renderer, wlr_buffer);
 	if (!buffer) {
 		return NULL;
 	}
 
-	struct wlr_gles2_render_pass *pass = begin_gles2_buffer_pass(buffer, timer);
+	struct wlr_gles2_render_pass *pass = begin_gles2_buffer_pass(buffer, &prev_ctx, timer);
 	if (!pass) {
 		return NULL;
 	}
@@ -651,10 +533,6 @@ static const struct wlr_renderer_impl renderer_impl = {
 	.bind_buffer = gles2_bind_buffer,
 	.begin = gles2_begin,
 	.end = gles2_end,
-	.clear = gles2_clear,
-	.scissor = gles2_scissor,
-	.render_subtexture_with_matrix = gles2_render_subtexture_with_matrix,
-	.render_quad_with_matrix = gles2_render_quad_with_matrix,
 	.get_shm_texture_formats = gles2_get_shm_texture_formats,
 	.get_dmabuf_texture_formats = gles2_get_dmabuf_texture_formats,
 	.get_render_formats = gles2_get_render_formats,
@@ -1011,5 +889,5 @@ bool wlr_gles2_renderer_check_ext(struct wlr_renderer *wlr_renderer,
 GLuint wlr_gles2_renderer_get_current_fbo(struct wlr_renderer *wlr_renderer) {
 	struct wlr_gles2_renderer *renderer = gles2_get_renderer(wlr_renderer);
 	assert(renderer->current_buffer);
-	return renderer->current_buffer->fbo;
+	return gles2_buffer_get_fbo(renderer->current_buffer);
 }

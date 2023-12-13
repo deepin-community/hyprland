@@ -90,6 +90,7 @@ static const char *const atom_map[ATOM_LAST] = {
 	[DND_ACTION_PRIVATE] = "XdndActionPrivate",
 	[NET_CLIENT_LIST] = "_NET_CLIENT_LIST",
 	[NET_CLIENT_LIST_STACKING] = "_NET_CLIENT_LIST_STACKING",
+	[NET_WORKAREA] = "_NET_WORKAREA",
 };
 
 #define STARTUP_INFO_REMOVE_PREFIX "remove: ID="
@@ -410,6 +411,10 @@ static void xwayland_surface_dissociate(struct wlr_xwayland_surface *xsurface) {
 	wl_list_init(&xsurface->unpaired_link);
 	xsurface->surface_id = 0;
 	xsurface->serial = 0;
+
+	wl_list_remove(&xsurface->stack_link);
+	wl_list_init(&xsurface->stack_link);
+	xwm_set_net_client_list_stacking(xsurface->xwm);
 }
 
 static void xwayland_surface_destroy(struct wlr_xwayland_surface *xsurface) {
@@ -422,7 +427,6 @@ static void xwayland_surface_destroy(struct wlr_xwayland_surface *xsurface) {
 	}
 
 	wl_list_remove(&xsurface->link);
-	wl_list_remove(&xsurface->stack_link);
 	wl_list_remove(&xsurface->parent_link);
 
 	struct wlr_xwayland_surface *child, *next;
@@ -998,6 +1002,24 @@ static void xwm_handle_configure_request(struct wlr_xwm *xwm,
 	wl_signal_emit_mutable(&surface->events.request_configure, &wlr_event);
 }
 
+static void xwm_update_override_redirect(struct wlr_xwayland_surface *xsurface,
+		bool override_redirect) {
+	if (xsurface->override_redirect == override_redirect) {
+		return;
+	}
+	xsurface->override_redirect = override_redirect;
+
+	if (override_redirect) {
+		wl_list_remove(&xsurface->stack_link);
+		wl_list_init(&xsurface->stack_link);
+		xwm_set_net_client_list_stacking(xsurface->xwm);
+	} else if (xsurface->surface != NULL && xsurface->surface->mapped) {
+		wlr_xwayland_surface_restack(xsurface, NULL, XCB_STACK_MODE_BELOW);
+	}
+
+	wl_signal_emit_mutable(&xsurface->events.set_override_redirect, NULL);
+}
+
 static void xwm_handle_configure_notify(struct wlr_xwm *xwm,
 		xcb_configure_notify_event_t *ev) {
 	struct wlr_xwayland_surface *xsurface = lookup_surface(xwm, ev->window);
@@ -1016,10 +1038,7 @@ static void xwm_handle_configure_notify(struct wlr_xwm *xwm,
 		xsurface->height = ev->height;
 	}
 
-	if (xsurface->override_redirect != ev->override_redirect) {
-		xsurface->override_redirect = ev->override_redirect;
-		wl_signal_emit_mutable(&xsurface->events.set_override_redirect, NULL);
-	}
+	xwm_update_override_redirect(xsurface, ev->override_redirect);
 
 	if (geometry_changed) {
 		wl_signal_emit_mutable(&xsurface->events.set_geometry, NULL);
@@ -1054,6 +1073,18 @@ void wlr_xwayland_surface_restack(struct wlr_xwayland_surface *xsurface,
 	size_t idx = 0;
 	uint32_t flags = XCB_CONFIG_WINDOW_STACK_MODE;
 
+	assert(!xsurface->override_redirect);
+
+	// X11 clients expect their override_redirect windows to stay on top.
+	// Avoid interfering by restacking above the topmost managed surface.
+	if (mode == XCB_STACK_MODE_ABOVE && !sibling) {
+		sibling = wl_container_of(xwm->surfaces_in_stack_order.prev, sibling, stack_link);
+	}
+
+	if (sibling == xsurface) {
+		return;
+	}
+
 	if (sibling != NULL) {
 		values[idx++] = sibling->window_id;
 		flags |= XCB_CONFIG_WINDOW_SIBLING;
@@ -1066,11 +1097,7 @@ void wlr_xwayland_surface_restack(struct wlr_xwayland_surface *xsurface,
 
 	struct wl_list *node;
 	if (mode == XCB_STACK_MODE_ABOVE) {
-		if (sibling) {
-			node = &sibling->stack_link;
-		} else {
-			node = xwm->surfaces_in_stack_order.prev;
-		}
+		node = &sibling->stack_link;
 	} else if (mode == XCB_STACK_MODE_BELOW) {
 		if (sibling) {
 			node = sibling->stack_link.prev;
@@ -1095,8 +1122,6 @@ static void xwm_handle_map_request(struct wlr_xwm *xwm,
 		return;
 	}
 
-	wlr_xwayland_surface_set_withdrawn(xsurface, false);
-	wlr_xwayland_surface_restack(xsurface, NULL, XCB_STACK_MODE_BELOW);
 	xcb_map_window(xwm->xcb_conn, ev->window);
 }
 
@@ -1107,9 +1132,11 @@ static void xwm_handle_map_notify(struct wlr_xwm *xwm,
 		return;
 	}
 
-	if (xsurface->override_redirect != ev->override_redirect) {
-		xsurface->override_redirect = ev->override_redirect;
-		wl_signal_emit_mutable(&xsurface->events.set_override_redirect, NULL);
+	xwm_update_override_redirect(xsurface, ev->override_redirect);
+
+	if (!xsurface->override_redirect) {
+		wlr_xwayland_surface_set_withdrawn(xsurface, false);
+		wlr_xwayland_surface_restack(xsurface, NULL, XCB_STACK_MODE_BELOW);
 	}
 }
 
@@ -1643,7 +1670,8 @@ static int x11_event_handler(int fd, uint32_t mask, void *data) {
 
 		if (xwm->xwayland->user_event_handler &&
 				xwm->xwayland->user_event_handler(xwm, event)) {
-			break;
+			free(event);
+			continue;
 		}
 
 		if (xwm_handle_selection_event(xwm, event)) {
@@ -2326,4 +2354,25 @@ enum wlr_xwayland_icccm_input_model wlr_xwayland_icccm_input_model(
 		}
 	}
 	return WLR_ICCCM_INPUT_MODEL_NONE;
+}
+
+void wlr_xwayland_set_workareas(struct wlr_xwayland *wlr_xwayland,
+		const struct wlr_box *workareas, size_t num_workareas) {
+	uint32_t *data = malloc(4 * sizeof(uint32_t) * num_workareas);
+	if (!data) {
+		return;
+	}
+
+	for (size_t i = 0; i < num_workareas; i++) {
+		data[4 * i] = workareas[i].x;
+		data[4 * i + 1] = workareas[i].y;
+		data[4 * i + 2] = workareas[i].width;
+		data[4 * i + 3] = workareas[i].height;
+	}
+
+	struct wlr_xwm *xwm = wlr_xwayland->xwm;
+	xcb_change_property(xwm->xcb_conn, XCB_PROP_MODE_REPLACE,
+			xwm->screen->root, xwm->atoms[NET_WORKAREA],
+			XCB_ATOM_CARDINAL, 32, 4 * num_workareas, data);
+	free(data);
 }

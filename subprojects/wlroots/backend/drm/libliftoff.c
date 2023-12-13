@@ -6,6 +6,7 @@
 #include <wlr/util/log.h>
 
 #include "backend/drm/drm.h"
+#include "backend/drm/fb.h"
 #include "backend/drm/iface.h"
 
 static bool init(struct wlr_drm_backend *drm) {
@@ -301,8 +302,8 @@ static void update_layer_feedback(struct wlr_drm_backend *drm,
 }
 
 static bool crtc_commit(struct wlr_drm_connector *conn,
-		const struct wlr_drm_connector_state *state, uint32_t flags,
-		bool test_only) {
+		const struct wlr_drm_connector_state *state,
+		struct wlr_drm_page_flip *page_flip, uint32_t flags, bool test_only) {
 	struct wlr_drm_backend *drm = conn->backend;
 	struct wlr_output *output = &conn->output;
 	struct wlr_drm_crtc *crtc = conn->crtc;
@@ -368,12 +369,8 @@ static bool crtc_commit(struct wlr_drm_connector *conn,
 	}
 	if (modeset) {
 		flags |= DRM_MODE_ATOMIC_ALLOW_MODESET;
-	} else if (!test_only && (state->base->committed & WLR_OUTPUT_STATE_BUFFER)) {
-		// The wlr_output API requires non-modeset commits with a new buffer to
-		// wait for the frame event. However compositors often perform
-		// non-modesets commits without a new buffer without waiting for the
-		// frame event. In that case we need to make the KMS commit blocking,
-		// otherwise the kernel will error out with EBUSY.
+	}
+	if (!test_only && state->nonblock) {
 		flags |= DRM_MODE_ATOMIC_NONBLOCK;
 	}
 
@@ -455,7 +452,7 @@ static bool crtc_commit(struct wlr_drm_connector *conn,
 		goto out;
 	}
 
-	ret = drmModeAtomicCommit(drm->fd, req, flags, drm);
+	ret = drmModeAtomicCommit(drm->fd, req, flags, page_flip);
 	if (ret != 0) {
 		wlr_drm_conn_log_errno(conn, test_only ? WLR_DEBUG : WLR_ERROR,
 			"Atomic commit failed");

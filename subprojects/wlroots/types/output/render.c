@@ -16,7 +16,6 @@
 bool wlr_output_init_render(struct wlr_output *output,
 		struct wlr_allocator *allocator, struct wlr_renderer *renderer) {
 	assert(allocator != NULL && renderer != NULL);
-	assert(output->back_buffer == NULL);
 
 	uint32_t backend_caps = backend_get_buffer_caps(output->backend);
 	uint32_t renderer_caps = renderer_get_render_buffer_caps(renderer);
@@ -40,46 +39,6 @@ bool wlr_output_init_render(struct wlr_output *output,
 	output->allocator = allocator;
 	output->renderer = renderer;
 
-	return true;
-}
-
-void output_clear_back_buffer(struct wlr_output *output) {
-	if (output->back_buffer == NULL) {
-		return;
-	}
-
-	struct wlr_renderer *renderer = output->renderer;
-	assert(renderer != NULL);
-
-	renderer_bind_buffer(renderer, NULL);
-
-	wlr_buffer_unlock(output->back_buffer);
-	output->back_buffer = NULL;
-}
-
-bool wlr_output_attach_render(struct wlr_output *output, int *buffer_age) {
-	assert(output->back_buffer == NULL);
-
-	if (!wlr_output_configure_primary_swapchain(output, &output->pending,
-			&output->swapchain)) {
-		return false;
-	}
-
-	struct wlr_renderer *renderer = output->renderer;
-	assert(renderer != NULL);
-
-	struct wlr_buffer *buffer =
-		wlr_swapchain_acquire(output->swapchain, buffer_age);
-	if (buffer == NULL) {
-		return false;
-	}
-
-	if (!renderer_bind_buffer(renderer, buffer)) {
-		wlr_buffer_unlock(buffer);
-		return false;
-	}
-
-	output->back_buffer = buffer;
 	return true;
 }
 
@@ -247,13 +206,24 @@ uint32_t wlr_output_preferred_read_format(struct wlr_output *output) {
 		return DRM_FORMAT_INVALID;
 	}
 
-	if (!wlr_output_attach_render(output, NULL)) {
+	if (!wlr_output_configure_primary_swapchain(output, &output->pending, &output->swapchain)) {
+		return false;
+	}
+
+	struct wlr_buffer *buffer = wlr_swapchain_acquire(output->swapchain, NULL);
+	if (buffer == NULL) {
+		return false;
+	}
+
+	if (!wlr_renderer_begin_with_buffer(renderer, buffer)) {
+		wlr_buffer_unlock(buffer);
 		return false;
 	}
 
 	uint32_t fmt = renderer->impl->preferred_read_format(renderer);
 
-	output_clear_back_buffer(output);
+	wlr_renderer_end(renderer);
+	wlr_buffer_unlock(buffer);
 
 	return fmt;
 }

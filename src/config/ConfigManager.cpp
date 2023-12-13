@@ -1,6 +1,8 @@
 #include "ConfigManager.hpp"
 #include "../managers/KeybindManager.hpp"
 
+#include "../render/decorations/CHyprGroupBarDecoration.hpp"
+
 #include <string.h>
 #include <string>
 #include <sys/stat.h>
@@ -31,6 +33,8 @@ CConfigManager::CConfigManager() {
     configValues["group:groupbar:col.locked_active"].data   = std::make_shared<CGradientValueData>(0x66ff5500);
     configValues["group:groupbar:col.locked_inactive"].data = std::make_shared<CGradientValueData>(0x66775500);
 
+    Debug::log(LOG, "NOTE: further logs to stdout / logfile are disabled by default. Use debug:disable_logs and debug:enable_stdout_logs to override this.");
+
     setDefaultVars();
     setDefaultAnimationVars();
 
@@ -44,12 +48,11 @@ CConfigManager::CConfigManager() {
 
 std::string CConfigManager::getConfigDir() {
     static const char* xdgConfigHome = getenv("XDG_CONFIG_HOME");
-    std::string        configPath;
-    if (!xdgConfigHome)
-        configPath = getenv("HOME") + std::string("/.config");
-    else
-        configPath = xdgConfigHome;
-    return configPath;
+
+    if (xdgConfigHome && std::filesystem::path(xdgConfigHome).is_absolute())
+        return xdgConfigHome;
+
+    return getenv("HOME") + std::string("/.config");
 }
 
 std::string CConfigManager::getMainConfigPath() {
@@ -79,6 +82,7 @@ void CConfigManager::setDefaultVars() {
     configValues["general:no_border_on_floating"].intValue = 0;
     configValues["general:gaps_in"].intValue               = 5;
     configValues["general:gaps_out"].intValue              = 20;
+    configValues["general:gaps_workspaces"].intValue       = 0;
     ((CGradientValueData*)configValues["general:col.active_border"].data.get())->reset(0xffffffff);
     ((CGradientValueData*)configValues["general:col.inactive_border"].data.get())->reset(0xff444444);
     ((CGradientValueData*)configValues["general:col.nogroup_border"].data.get())->reset(0xff444444);
@@ -145,7 +149,7 @@ void CConfigManager::setDefaultVars() {
     configValues["debug:log_damage"].intValue         = 0;
     configValues["debug:overlay"].intValue            = 0;
     configValues["debug:damage_blink"].intValue       = 0;
-    configValues["debug:disable_logs"].intValue       = 0;
+    configValues["debug:disable_logs"].intValue       = 1;
     configValues["debug:disable_time"].intValue       = 1;
     configValues["debug:enable_stdout_logs"].intValue = 0;
     configValues["debug:damage_tracking"].intValue    = DAMAGE_TRACKING_FULL;
@@ -188,7 +192,7 @@ void CConfigManager::setDefaultVars() {
     configValues["dwindle:force_split"].intValue                  = 0;
     configValues["dwindle:permanent_direction_override"].intValue = 0;
     configValues["dwindle:preserve_split"].intValue               = 0;
-    configValues["dwindle:special_scale_factor"].floatValue       = 0.8f;
+    configValues["dwindle:special_scale_factor"].floatValue       = 1.f;
     configValues["dwindle:split_width_multiplier"].floatValue     = 1.0f;
     configValues["dwindle:no_gaps_when_only"].intValue            = 0;
     configValues["dwindle:use_active_for_splits"].intValue        = 1;
@@ -196,7 +200,7 @@ void CConfigManager::setDefaultVars() {
     configValues["dwindle:smart_split"].intValue                  = 0;
     configValues["dwindle:smart_resizing"].intValue               = 1;
 
-    configValues["master:special_scale_factor"].floatValue = 0.8f;
+    configValues["master:special_scale_factor"].floatValue = 1.f;
     configValues["master:mfact"].floatValue                = 0.55f;
     configValues["master:new_is_master"].intValue          = 1;
     configValues["master:always_center_master"].intValue   = 0;
@@ -208,7 +212,8 @@ void CConfigManager::setDefaultVars() {
     configValues["master:smart_resizing"].intValue         = 1;
     configValues["master:drop_at_cursor"].intValue         = 1;
 
-    configValues["animations:enabled"].intValue = 1;
+    configValues["animations:enabled"].intValue                = 1;
+    configValues["animations:first_launch_animation"].intValue = 1;
 
     configValues["input:follow_mouse"].intValue                     = 1;
     configValues["input:mouse_refocus"].intValue                    = 1;
@@ -1164,13 +1169,13 @@ void CConfigManager::handleWorkspaceRules(const std::string& command, const std:
     auto           rules = value.substr(FIRST_DELIM + 1);
     SWorkspaceRule wsRule;
     wsRule.workspaceString = first_ident;
-    if (id == INT_MAX) {
+    if (id == WORKSPACE_INVALID) {
         // it could be the monitor. If so, second value MUST be
         // the workspace.
         const auto WORKSPACE_DELIM = value.find_first_of(',', FIRST_DELIM + 1);
         auto       wsIdent         = removeBeginEndSpacesTabs(value.substr(FIRST_DELIM + 1, (WORKSPACE_DELIM - FIRST_DELIM - 1)));
         id                         = getWorkspaceIDFromString(wsIdent, name);
-        if (id == INT_MAX) {
+        if (id == WORKSPACE_INVALID) {
             Debug::log(ERR, "Invalid workspace identifier found: {}", wsIdent);
             parseError = "Invalid workspace identifier found: " + wsIdent;
             return;
@@ -1208,6 +1213,8 @@ void CConfigManager::handleWorkspaceRules(const std::string& command, const std:
             wsRule.isPersistent = configStringToInt(rule.substr(delim + 11));
         else if ((delim = rule.find(ruleOnCreatedEmtpy)) != std::string::npos)
             wsRule.onCreatedEmptyRunCmd = cleanCmdForWorkspace(name, rule.substr(delim + ruleOnCreatedEmtpyLen));
+        else if ((delim = rule.find("layoutopt:orientation:")) != std::string::npos)
+            wsRule.layoutopts["orientation"] = rule.substr(delim + 22);
     };
 
     size_t      pos = 0;
@@ -1255,7 +1262,12 @@ void CConfigManager::handleSource(const std::string& command, const std::string&
     for (size_t i = 0; i < glob_buf->gl_pathc; i++) {
         auto value = absolutePath(glob_buf->gl_pathv[i], configCurrentPath);
 
-        if (!std::filesystem::exists(value)) {
+        if (!std::filesystem::is_regular_file(value)) {
+            if (std::filesystem::exists(value)) {
+                Debug::log(WARN, "source= skipping non-file {}", value);
+                continue;
+            }
+
             Debug::log(ERR, "source= file doesnt exist");
             parseError = "source file " + value + " doesn't exist!";
             return;
@@ -1509,7 +1521,7 @@ void CConfigManager::parseLine(std::string& line) {
 
         const auto LASTSEP = currentCategory.find_last_of(':');
 
-        if (LASTSEP == std::string::npos || currentCategory.contains("device"))
+        if (LASTSEP == std::string::npos || currentCategory.starts_with("device"))
             currentCategory = "";
         else
             currentCategory = currentCategory.substr(0, LASTSEP);
@@ -1562,20 +1574,20 @@ void CConfigManager::loadConfigLoadVars() {
     std::string mainConfigPath = getMainConfigPath();
     Debug::log(LOG, "Using config: {}", mainConfigPath);
     configPaths.push_back(mainConfigPath);
-    std::string configPath = mainConfigPath.substr(0, mainConfigPath.find_last_of('/'));
-    // find_last_of never returns npos since main_config at least has /hypr/
 
-    if (!std::filesystem::is_directory(configPath)) {
-        Debug::log(WARN, "Creating config home directory");
-        try {
-            std::filesystem::create_directories(configPath);
-        } catch (...) {
-            parseError = "Broken config file! (Could not create config directory)";
-            return;
+    if (g_pCompositor->explicitConfigPath.empty() && !std::filesystem::exists(mainConfigPath)) {
+        std::string configPath = std::filesystem::path(mainConfigPath).parent_path();
+
+        if (!std::filesystem::is_directory(configPath)) {
+            Debug::log(WARN, "Creating config home directory");
+            try {
+                std::filesystem::create_directories(configPath);
+            } catch (...) {
+                parseError = "Broken config file! (Could not create config directory)";
+                return;
+            }
         }
-    }
 
-    if (!std::filesystem::exists(mainConfigPath)) {
         Debug::log(WARN, "No config file found; attempting to generate.");
         std::ofstream ofs;
         ofs.open(mainConfigPath, std::ios::trunc);
@@ -1666,6 +1678,9 @@ void CConfigManager::loadConfigLoadVars() {
         ensureMonitorStatus();
         ensureVRR();
     }
+
+    if (!isFirstLaunch && !g_pCompositor->m_bUnsafeState)
+        refreshGroupBarGradients();
 
     // Updates dynamic window and workspace rules
     for (auto& w : g_pCompositor->m_vWindows) {
@@ -2073,7 +2088,7 @@ void CConfigManager::performMonitorReload() {
         if (!m->output || m->isUnsafeFallback)
             continue;
 
-        auto rule = getMonitorRuleFor(m->szName, m->output->description ? m->output->description : "");
+        auto rule = getMonitorRuleFor(m->szName, m->szDescription);
 
         if (!g_pHyprRenderer->applyMonitorRule(m.get(), &rule)) {
             overAgain = true;
@@ -2154,7 +2169,7 @@ void CConfigManager::ensureMonitorStatus() {
         if (!rm->output || rm->isUnsafeFallback)
             continue;
 
-        auto rule = getMonitorRuleFor(rm->szName, rm->output->description ? rm->output->description : "");
+        auto rule = getMonitorRuleFor(rm->szName, rm->szDescription);
 
         if (rule.disabled == rm->m_bEnabled)
             g_pHyprRenderer->applyMonitorRule(rm.get(), &rule);

@@ -83,10 +83,15 @@ struct wlr_layer_surface_v1 {
 
 	char *namespace;
 
-	bool added, configured;
+	bool configured;
 	struct wl_list configure_list;
 
 	struct wlr_layer_surface_v1_state current, pending;
+
+	// Whether the surface is ready to receive configure events
+	bool initialized;
+	// Whether the latest commit is an initial commit
+	bool initial_commit;
 
 	struct {
 		/**

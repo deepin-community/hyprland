@@ -5,6 +5,7 @@
 #include <wlr/util/log.h>
 #include <wlr/util/edges.h>
 #include "types/wlr_xdg_shell.h"
+#include "util/utf8.h"
 
 void handle_xdg_toplevel_ack_configure(
 		struct wlr_xdg_toplevel *toplevel,
@@ -78,31 +79,25 @@ struct wlr_xdg_toplevel_configure *send_xdg_toplevel_configure(
 	if (configure->activated) {
 		states[nstates++] = XDG_TOPLEVEL_STATE_ACTIVATED;
 	}
-	if (configure->tiled) {
-		if (version >= XDG_TOPLEVEL_STATE_TILED_LEFT_SINCE_VERSION) {
-			const struct {
-				enum wlr_edges edge;
-				enum xdg_toplevel_state state;
-			} tiled[] = {
-				{ WLR_EDGE_LEFT, XDG_TOPLEVEL_STATE_TILED_LEFT },
-				{ WLR_EDGE_RIGHT, XDG_TOPLEVEL_STATE_TILED_RIGHT },
-				{ WLR_EDGE_TOP, XDG_TOPLEVEL_STATE_TILED_TOP },
-				{ WLR_EDGE_BOTTOM, XDG_TOPLEVEL_STATE_TILED_BOTTOM },
-			};
+	if (configure->tiled && version >= XDG_TOPLEVEL_STATE_TILED_LEFT_SINCE_VERSION) {
+		const struct {
+			enum wlr_edges edge;
+			enum xdg_toplevel_state state;
+		} tiled[] = {
+			{ WLR_EDGE_LEFT, XDG_TOPLEVEL_STATE_TILED_LEFT },
+			{ WLR_EDGE_RIGHT, XDG_TOPLEVEL_STATE_TILED_RIGHT },
+			{ WLR_EDGE_TOP, XDG_TOPLEVEL_STATE_TILED_TOP },
+			{ WLR_EDGE_BOTTOM, XDG_TOPLEVEL_STATE_TILED_BOTTOM },
+		};
 
-			for (size_t i = 0; i < sizeof(tiled)/sizeof(tiled[0]); ++i) {
-				if ((configure->tiled & tiled[i].edge) == 0) {
-					continue;
-				}
-				states[nstates++] = tiled[i].state;
+		for (size_t i = 0; i < sizeof(tiled)/sizeof(tiled[0]); ++i) {
+			if ((configure->tiled & tiled[i].edge) == 0) {
+				continue;
 			}
-		} else if (!configure->maximized) {
-			states[nstates++] = XDG_TOPLEVEL_STATE_MAXIMIZED;
+			states[nstates++] = tiled[i].state;
 		}
 	}
-
-	if (configure->suspended &&
-			version >= XDG_TOPLEVEL_STATE_SUSPENDED_SINCE_VERSION) {
+	if (configure->suspended && version >= XDG_TOPLEVEL_STATE_SUSPENDED_SINCE_VERSION) {
 		states[nstates++] = XDG_TOPLEVEL_STATE_SUSPENDED;
 	}
 	assert(nstates <= sizeof(states) / sizeof(states[0]));
@@ -164,6 +159,14 @@ struct wlr_xdg_toplevel *wlr_xdg_toplevel_from_resource(
 	return wl_resource_get_user_data(resource);
 }
 
+struct wlr_xdg_toplevel *wlr_xdg_toplevel_try_from_wlr_surface(struct wlr_surface *surface) {
+	struct wlr_xdg_surface *xdg_surface = wlr_xdg_surface_try_from_wlr_surface(surface);
+	if (xdg_surface == NULL || xdg_surface->role != WLR_XDG_SURFACE_ROLE_TOPLEVEL) {
+		return NULL;
+	}
+	return xdg_surface->toplevel;
+}
+
 static void handle_parent_unmap(struct wl_listener *listener, void *data) {
 	struct wlr_xdg_toplevel *toplevel =
 		wl_container_of(listener, toplevel, parent_unmap);
@@ -221,6 +224,12 @@ static void xdg_toplevel_handle_set_title(struct wl_client *client,
 	struct wlr_xdg_toplevel *toplevel =
 		wlr_xdg_toplevel_from_resource(resource);
 	char *tmp;
+
+	if (!is_utf8(title)) {
+		// TODO: update when xdg_toplevel has a dedicated error code for this
+		wl_resource_post_error(resource, (uint32_t)-1, "xdg_toplevel title is not valid UTF-8");
+		return;
+	}
 
 	tmp = strdup(title);
 	if (tmp == NULL) {
@@ -467,6 +476,7 @@ void create_xdg_toplevel(struct wlr_xdg_surface *surface,
 	}
 	surface->toplevel->base = surface;
 
+	wl_signal_init(&surface->toplevel->events.destroy);
 	wl_signal_init(&surface->toplevel->events.request_maximize);
 	wl_signal_init(&surface->toplevel->events.request_fullscreen);
 	wl_signal_init(&surface->toplevel->events.request_minimize);
@@ -490,6 +500,8 @@ void create_xdg_toplevel(struct wlr_xdg_surface *surface,
 		&xdg_toplevel_implementation, surface->toplevel, NULL);
 
 	set_xdg_surface_role_object(surface, surface->toplevel->resource);
+
+	wl_signal_emit_mutable(&surface->client->shell->events.new_toplevel, surface->toplevel);
 }
 
 void reset_xdg_toplevel(struct wlr_xdg_toplevel *toplevel) {
@@ -513,14 +525,9 @@ void reset_xdg_toplevel(struct wlr_xdg_toplevel *toplevel) {
 
 void destroy_xdg_toplevel(struct wlr_xdg_toplevel *toplevel) {
 	wlr_surface_unmap(toplevel->base->surface);
-
 	reset_xdg_toplevel(toplevel);
 
-	// TODO: improve events
-	if (toplevel->base->added) {
-		wl_signal_emit_mutable(&toplevel->base->events.destroy, NULL);
-		toplevel->base->added = false;
-	}
+	wl_signal_emit_mutable(&toplevel->events.destroy, NULL);
 
 	toplevel->base->toplevel = NULL;
 	wl_resource_set_user_data(toplevel->resource, NULL);

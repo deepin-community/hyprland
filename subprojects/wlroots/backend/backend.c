@@ -73,7 +73,8 @@ void wlr_backend_destroy(struct wlr_backend *backend) {
 
 static struct wlr_session *session_create_and_wait(struct wl_display *disp) {
 #if WLR_HAS_SESSION
-	struct wlr_session *session = wlr_session_create(disp);
+	struct wl_event_loop *event_loop = wl_display_get_event_loop(disp);
+	struct wlr_session *session = wlr_session_create(event_loop);
 
 	if (!session) {
 		wlr_log(WLR_ERROR, "Failed to start a session");
@@ -85,8 +86,6 @@ static struct wlr_session *session_create_and_wait(struct wl_display *disp) {
 
 		int64_t started_at = get_current_time_msec();
 		int64_t timeout = WAIT_SESSION_TIMEOUT;
-		struct wl_event_loop *event_loop =
-			wl_display_get_event_loop(session->display);
 
 		while (!session->active) {
 			int ret = wl_event_loop_dispatch(event_loop, (int)timeout);
@@ -114,13 +113,6 @@ static struct wlr_session *session_create_and_wait(struct wl_display *disp) {
 	wlr_log(WLR_ERROR, "Cannot create session: disabled at compile-time");
 	return NULL;
 #endif
-}
-
-clockid_t wlr_backend_get_presentation_clock(struct wlr_backend *backend) {
-	if (backend->impl->get_presentation_clock) {
-		return backend->impl->get_presentation_clock(backend);
-	}
-	return CLOCK_MONOTONIC;
 }
 
 int wlr_backend_get_drm_fd(struct wlr_backend *backend) {
@@ -241,7 +233,7 @@ static bool attempt_drm_backend(struct wl_display *display,
 	}
 
 	if (getenv("WLR_DRM_DEVICES") == NULL) {
-		drm_backend_monitor_create(backend, primary_drm, session);
+		drm_backend_monitor_create(backend, primary_drm, session, display);
 	}
 
 	return true;
