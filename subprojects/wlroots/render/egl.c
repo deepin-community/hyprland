@@ -11,7 +11,6 @@
 #include <wlr/util/region.h>
 #include <xf86drm.h>
 #include "render/egl.h"
-#include "util/env.h"
 
 static enum wlr_log_importance egl_log_importance_to_wlr(EGLint type) {
 	switch (type) {
@@ -95,66 +94,36 @@ static void load_egl_proc(void *proc_ptr, const char *name) {
 	*(void **)proc_ptr = proc;
 }
 
-static int get_egl_dmabuf_formats(struct wlr_egl *egl, EGLint **formats);
-static int get_egl_dmabuf_modifiers(struct wlr_egl *egl, EGLint format,
+static int get_egl_dmabuf_formats(struct wlr_egl *egl, int **formats);
+static int get_egl_dmabuf_modifiers(struct wlr_egl *egl, int format,
 	uint64_t **modifiers, EGLBoolean **external_only);
 
-static void log_modifier(uint64_t modifier, bool external_only) {
-	char *mod_name = drmGetFormatModifierName(modifier);
-	wlr_log(WLR_DEBUG, "    %s (0x%016"PRIX64"): ✓ texture  %s render",
-		mod_name ? mod_name : "<unknown>", modifier, external_only ? "✗" : "✓");
-	free(mod_name);
-}
-
 static void init_dmabuf_formats(struct wlr_egl *egl) {
-	bool no_modifiers = env_parse_bool("WLR_EGL_NO_MODIFIERS");
-	if (no_modifiers) {
-		wlr_log(WLR_INFO, "WLR_EGL_NO_MODIFIERS set, disabling modifiers for EGL");
-	}
-
-	EGLint *formats;
+	int *formats;
 	int formats_len = get_egl_dmabuf_formats(egl, &formats);
 	if (formats_len < 0) {
 		return;
 	}
 
-	wlr_log(WLR_DEBUG, "Supported DMA-BUF formats:");
-
 	bool has_modifiers = false;
 	for (int i = 0; i < formats_len; i++) {
-		EGLint fmt = formats[i];
+		uint32_t fmt = formats[i];
 
-		uint64_t *modifiers = NULL;
-		EGLBoolean *external_only = NULL;
-		int modifiers_len = 0;
-		if (!no_modifiers) {
-			modifiers_len = get_egl_dmabuf_modifiers(egl, fmt, &modifiers, &external_only);
-		}
+		uint64_t *modifiers;
+		EGLBoolean *external_only;
+		int modifiers_len =
+			get_egl_dmabuf_modifiers(egl, fmt, &modifiers, &external_only);
 		if (modifiers_len < 0) {
 			continue;
 		}
 
 		has_modifiers = has_modifiers || modifiers_len > 0;
 
-		bool all_external_only = true;
-		for (int j = 0; j < modifiers_len; j++) {
-			wlr_drm_format_set_add(&egl->dmabuf_texture_formats, fmt,
-				modifiers[j]);
-			if (!external_only[j]) {
-				wlr_drm_format_set_add(&egl->dmabuf_render_formats, fmt,
-					modifiers[j]);
-				all_external_only = false;
-			}
-		}
-
-		// EGL always supports implicit modifiers. If at least one modifier supports rendering,
-		// assume the implicit modifier supports rendering too.
+		// EGL always supports implicit modifiers
 		wlr_drm_format_set_add(&egl->dmabuf_texture_formats, fmt,
 			DRM_FORMAT_MOD_INVALID);
-		if (modifiers_len == 0 || !all_external_only) {
-			wlr_drm_format_set_add(&egl->dmabuf_render_formats, fmt,
-				DRM_FORMAT_MOD_INVALID);
-		}
+		wlr_drm_format_set_add(&egl->dmabuf_render_formats, fmt,
+			DRM_FORMAT_MOD_INVALID);
 
 		if (modifiers_len == 0) {
 			// Asume the linear layout is supported if the driver doesn't
@@ -165,31 +134,36 @@ static void init_dmabuf_formats(struct wlr_egl *egl) {
 				DRM_FORMAT_MOD_LINEAR);
 		}
 
-		if (wlr_log_get_verbosity() >= WLR_DEBUG) {
-			char *fmt_name = drmGetFormatName(fmt);
-			wlr_log(WLR_DEBUG, "  %s (0x%08"PRIX32")",
-				fmt_name ? fmt_name : "<unknown>", fmt);
-			free(fmt_name);
-
-			log_modifier(DRM_FORMAT_MOD_INVALID, false);
-			if (modifiers_len == 0) {
-				log_modifier(DRM_FORMAT_MOD_LINEAR, false);
-			}
-			for (int j = 0; j < modifiers_len; j++) {
-				log_modifier(modifiers[j], external_only[j]);
+		for (int j = 0; j < modifiers_len; j++) {
+			wlr_drm_format_set_add(&egl->dmabuf_texture_formats, fmt,
+				modifiers[j]);
+			if (!external_only[j]) {
+				wlr_drm_format_set_add(&egl->dmabuf_render_formats, fmt,
+					modifiers[j]);
 			}
 		}
 
 		free(modifiers);
 		free(external_only);
 	}
-	free(formats);
+
+	char *str_formats = malloc(formats_len * 5 + 1);
+	if (str_formats == NULL) {
+		goto out;
+	}
+	for (int i = 0; i < formats_len; i++) {
+		snprintf(&str_formats[i*5], (formats_len - i) * 5 + 1, "%.4s ",
+			(char*)&formats[i]);
+	}
+	wlr_log(WLR_DEBUG, "Supported DMA-BUF formats: %s", str_formats);
+	wlr_log(WLR_DEBUG, "EGL DMA-BUF format modifiers %s",
+		has_modifiers ? "supported" : "unsupported");
+	free(str_formats);
 
 	egl->has_modifiers = has_modifiers;
-	if (!no_modifiers) {
-		wlr_log(WLR_DEBUG, "EGL DMA-BUF format modifiers %s",
-			has_modifiers ? "supported" : "unsupported");
-	}
+
+out:
+	free(formats);
 }
 
 static struct wlr_egl *egl_create(void) {
@@ -210,7 +184,7 @@ static struct wlr_egl *egl_create(void) {
 		return NULL;
 	}
 
-	struct wlr_egl *egl = calloc(1, sizeof(*egl));
+	struct wlr_egl *egl = calloc(1, sizeof(struct wlr_egl));
 	if (egl == NULL) {
 		wlr_log_errno(WLR_ERROR, "Allocation failed");
 		return NULL;
@@ -221,10 +195,9 @@ static struct wlr_egl *egl_create(void) {
 
 	egl->exts.KHR_platform_gbm = check_egl_ext(client_exts_str,
 			"EGL_KHR_platform_gbm");
+
 	egl->exts.EXT_platform_device = check_egl_ext(client_exts_str,
 			"EGL_EXT_platform_device");
-	egl->exts.KHR_display_reference = check_egl_ext(client_exts_str,
-			"EGL_KHR_display_reference");
 
 	if (check_egl_ext(client_exts_str, "EGL_EXT_device_base") || check_egl_ext(client_exts_str, "EGL_EXT_device_enumeration")) {
 		load_egl_proc(&egl->procs.eglQueryDevicesEXT, "eglQueryDevicesEXT");
@@ -261,7 +234,7 @@ static struct wlr_egl *egl_create(void) {
 	return egl;
 }
 
-static bool egl_init_display(struct wlr_egl *egl, EGLDisplay display) {
+static bool egl_init_display(struct wlr_egl *egl, EGLDisplay *display) {
 	egl->display = display;
 
 	EGLint major, minor;
@@ -293,9 +266,6 @@ static bool egl_init_display(struct wlr_egl *egl, EGLDisplay display) {
 			"eglQueryDmaBufModifiersEXT");
 	}
 
-	egl->exts.EXT_create_context_robustness =
-		check_egl_ext(display_exts_str, "EGL_EXT_create_context_robustness");
-
 	const char *device_exts_str = NULL, *driver_name = NULL;
 	if (egl->exts.EXT_device_query) {
 		EGLAttrib device_attrib;
@@ -314,7 +284,8 @@ static bool egl_init_display(struct wlr_egl *egl, EGLDisplay display) {
 		}
 
 		if (check_egl_ext(device_exts_str, "EGL_MESA_device_software")) {
-			if (env_parse_bool("WLR_RENDERER_ALLOW_SOFTWARE")) {
+			const char *allow_software = getenv("WLR_RENDERER_ALLOW_SOFTWARE");
+			if (allow_software != NULL && strcmp(allow_software, "1") == 0) {
 				wlr_log(WLR_INFO, "Using software rendering");
 			} else {
 				wlr_log(WLR_ERROR, "Software rendering detected, please use "
@@ -369,33 +340,20 @@ static bool egl_init_display(struct wlr_egl *egl, EGLDisplay display) {
 
 static bool egl_init(struct wlr_egl *egl, EGLenum platform,
 		void *remote_display) {
-	EGLint display_attribs[3] = {0};
-	size_t display_attribs_len = 0;
-
-	if (egl->exts.KHR_display_reference) {
-		display_attribs[display_attribs_len++] = EGL_TRACK_REFERENCES_KHR;
-		display_attribs[display_attribs_len++] = EGL_TRUE;
-	}
-
-	display_attribs[display_attribs_len++] = EGL_NONE;
-	assert(display_attribs_len < sizeof(display_attribs) / sizeof(display_attribs[0]));
-
 	EGLDisplay display = egl->procs.eglGetPlatformDisplayEXT(platform,
-		remote_display, display_attribs);
+		remote_display, NULL);
 	if (display == EGL_NO_DISPLAY) {
 		wlr_log(WLR_ERROR, "Failed to create EGL display");
 		return false;
 	}
 
 	if (!egl_init_display(egl, display)) {
-		if (egl->exts.KHR_display_reference) {
-			eglTerminate(display);
-		}
+		eglTerminate(display);
 		return false;
 	}
 
 	size_t atti = 0;
-	EGLint attribs[7];
+	EGLint attribs[5];
 	attribs[atti++] = EGL_CONTEXT_CLIENT_VERSION;
 	attribs[atti++] = 2;
 
@@ -408,11 +366,6 @@ static bool egl_init(struct wlr_egl *egl, EGLenum platform,
 	if (request_high_priority) {
 		attribs[atti++] = EGL_CONTEXT_PRIORITY_LEVEL_IMG;
 		attribs[atti++] = EGL_CONTEXT_PRIORITY_HIGH_IMG;
-	}
-
-	if (egl->exts.EXT_create_context_robustness) {
-		attribs[atti++] = EGL_CONTEXT_OPENGL_RESET_NOTIFICATION_STRATEGY_EXT;
-		attribs[atti++] = EGL_LOSE_CONTEXT_ON_RESET_EXT;
 	}
 
 	attribs[atti++] = EGL_NONE;
@@ -446,9 +399,6 @@ static EGLDeviceEXT get_egl_device_from_drm_fd(struct wlr_egl *egl,
 	if (egl->procs.eglQueryDevicesEXT == NULL) {
 		wlr_log(WLR_DEBUG, "EGL_EXT_device_enumeration not supported");
 		return EGL_NO_DEVICE_EXT;
-	} else if (!egl->exts.EXT_device_query) {
-		wlr_log(WLR_DEBUG, "EGL_EXT_device_query not supported");
-		return EGL_NO_DEVICE_EXT;
 	}
 
 	EGLint nb_devices = 0;
@@ -457,7 +407,7 @@ static EGLDeviceEXT get_egl_device_from_drm_fd(struct wlr_egl *egl,
 		return EGL_NO_DEVICE_EXT;
 	}
 
-	EGLDeviceEXT *devices = calloc(nb_devices, sizeof(*devices));
+	EGLDeviceEXT *devices = calloc(nb_devices, sizeof(EGLDeviceEXT));
 	if (devices == NULL) {
 		wlr_log_errno(WLR_ERROR, "Failed to allocate EGL device list");
 		return EGL_NO_DEVICE_EXT;
@@ -570,6 +520,11 @@ struct wlr_egl *wlr_egl_create_with_drm_fd(int drm_fd) {
 
 error:
 	wlr_log(WLR_ERROR, "Failed to initialize EGL context");
+	if (egl->display) {
+		eglMakeCurrent(egl->display, EGL_NO_SURFACE, EGL_NO_SURFACE,
+			EGL_NO_CONTEXT);
+		eglTerminate(egl->display);
+	}
 	free(egl);
 	eglReleaseThread();
 	return NULL;
@@ -615,12 +570,9 @@ void wlr_egl_destroy(struct wlr_egl *egl) {
 	wlr_drm_format_set_finish(&egl->dmabuf_texture_formats);
 
 	eglMakeCurrent(egl->display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+
 	eglDestroyContext(egl->display, egl->context);
-
-	if (egl->exts.KHR_display_reference) {
-		eglTerminate(egl->display);
-	}
-
+	eglTerminate(egl->display);
 	eglReleaseThread();
 
 	if (egl->gbm_device) {
@@ -789,7 +741,7 @@ EGLImageKHR wlr_egl_create_image_from_dmabuf(struct wlr_egl *egl,
 	return image;
 }
 
-static int get_egl_dmabuf_formats(struct wlr_egl *egl, EGLint **formats) {
+static int get_egl_dmabuf_formats(struct wlr_egl *egl, int **formats) {
 	if (!egl->exts.EXT_image_dma_buf_import) {
 		wlr_log(WLR_DEBUG, "DMA-BUF import extension not present");
 		return -1;
@@ -801,13 +753,14 @@ static int get_egl_dmabuf_formats(struct wlr_egl *egl, EGLint **formats) {
 	// Just a guess but better than not supporting dmabufs at all,
 	// given that the modifiers extension isn't supported everywhere.
 	if (!egl->exts.EXT_image_dma_buf_import_modifiers) {
-		static const EGLint fallback_formats[] = {
+		static const int fallback_formats[] = {
 			DRM_FORMAT_ARGB8888,
 			DRM_FORMAT_XRGB8888,
 		};
-		int num = sizeof(fallback_formats) / sizeof(fallback_formats[0]);
+		static unsigned num = sizeof(fallback_formats) /
+			sizeof(fallback_formats[0]);
 
-		*formats = calloc(num, sizeof(**formats));
+		*formats = calloc(num, sizeof(int));
 		if (!*formats) {
 			wlr_log_errno(WLR_ERROR, "Allocation failed");
 			return -1;
@@ -823,7 +776,7 @@ static int get_egl_dmabuf_formats(struct wlr_egl *egl, EGLint **formats) {
 		return -1;
 	}
 
-	*formats = calloc(num, sizeof(**formats));
+	*formats = calloc(num, sizeof(int));
 	if (*formats == NULL) {
 		wlr_log(WLR_ERROR, "Allocation failed: %s", strerror(errno));
 		return -1;
@@ -837,7 +790,7 @@ static int get_egl_dmabuf_formats(struct wlr_egl *egl, EGLint **formats) {
 	return num;
 }
 
-static int get_egl_dmabuf_modifiers(struct wlr_egl *egl, EGLint format,
+static int get_egl_dmabuf_modifiers(struct wlr_egl *egl, int format,
 		uint64_t **modifiers, EGLBoolean **external_only) {
 	*modifiers = NULL;
 	*external_only = NULL;
@@ -860,12 +813,12 @@ static int get_egl_dmabuf_modifiers(struct wlr_egl *egl, EGLint format,
 		return 0;
 	}
 
-	*modifiers = calloc(num, sizeof(**modifiers));
+	*modifiers = calloc(num, sizeof(uint64_t));
 	if (*modifiers == NULL) {
 		wlr_log_errno(WLR_ERROR, "Allocation failed");
 		return -1;
 	}
-	*external_only = calloc(num, sizeof(**external_only));
+	*external_only = calloc(num, sizeof(EGLBoolean));
 	if (*external_only == NULL) {
 		wlr_log_errno(WLR_ERROR, "Allocation failed");
 		free(*modifiers);
@@ -912,7 +865,7 @@ static char *get_render_name(const char *name) {
 		wlr_log(WLR_ERROR, "drmGetDevices2 failed: %s", strerror(-devices_len));
 		return NULL;
 	}
-	drmDevice **devices = calloc(devices_len, sizeof(*devices));
+	drmDevice **devices = calloc(devices_len, sizeof(drmDevice *));
 	if (devices == NULL) {
 		wlr_log_errno(WLR_ERROR, "Allocation failed");
 		return NULL;

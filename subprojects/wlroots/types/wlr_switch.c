@@ -15,11 +15,10 @@ struct wlr_switch *wlr_switch_from_input_device(
 
 void wlr_switch_init(struct wlr_switch *switch_device,
 		const struct wlr_switch_impl *impl, const char *name) {
-	*switch_device = (struct wlr_switch){
-		.impl = impl,
-	};
+	memset(switch_device, 0, sizeof(*switch_device));
 	wlr_input_device_init(&switch_device->base, WLR_INPUT_DEVICE_SWITCH, name);
 
+	switch_device->impl = impl;
 	wl_signal_init(&switch_device->events.toggle);
 }
 

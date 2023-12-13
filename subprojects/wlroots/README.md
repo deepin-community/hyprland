@@ -30,7 +30,7 @@ them work independently of one another and freely compose with anything you want
 to implement yourself.
 
 Check out our [wiki] to get started with wlroots. Join our IRC channel:
-[#wlroots on Libera Chat].
+[#sway-devel on Libera Chat].
 
 A variety of [wrapper libraries] are available for using it with your favorite
 programming language.
@@ -48,12 +48,9 @@ Install dependencies:
 * GBM (optional, for the GBM allocator)
 * libinput (optional, for the libinput backend)
 * xkbcommon
-* udev (optional, for the session)
+* udev
 * pixman
-* [libseat] (optional, for the session)
-* [hwdata] (optional, for the DRM backend)
-* [libdisplay-info] (optional, for the DRM backend)
-* [libliftoff] (optional, for the DRM backend)
+* [libseat]
 
 If you choose to enable X11 support:
 
@@ -65,7 +62,7 @@ If you choose to enable X11 support:
 
 Run these commands:
 
-    meson setup build/
+    meson build/
     ninja -C build/
 
 Install like so:
@@ -78,10 +75,7 @@ See [CONTRIBUTING.md].
 
 [Wayland]: https://wayland.freedesktop.org/
 [wiki]: https://gitlab.freedesktop.org/wlroots/wlroots/-/wikis/Getting-started
-[#wlroots on Libera Chat]: https://web.libera.chat/gamja/?channels=#wlroots
+[#sway-devel on Libera Chat]: https://web.libera.chat/gamja/?channels=#sway-devel
 [wrapper libraries]: https://gitlab.freedesktop.org/wlroots/wlroots/-/wikis/Projects-which-use-wlroots#wrapper-libraries
 [libseat]: https://git.sr.ht/~kennylevinsen/seatd
-[hwdata]: https://github.com/vcrhonek/hwdata
-[libdisplay-info]: https://gitlab.freedesktop.org/emersion/libdisplay-info
-[libliftoff]: https://gitlab.freedesktop.org/emersion/libliftoff
 [CONTRIBUTING.md]: https://gitlab.freedesktop.org/wlroots/wlroots/-/blob/master/CONTRIBUTING.md

@@ -39,7 +39,6 @@ struct tinywl_server {
 	struct wlr_renderer *renderer;
 	struct wlr_allocator *allocator;
 	struct wlr_scene *scene;
-	struct wlr_scene_output_layout *scene_layout;
 
 	struct wlr_xdg_shell *xdg_shell;
 	struct wl_listener new_xdg_surface;
@@ -74,7 +73,6 @@ struct tinywl_output {
 	struct tinywl_server *server;
 	struct wlr_output *wlr_output;
 	struct wl_listener frame;
-	struct wl_listener request_state;
 	struct wl_listener destroy;
 };
 
@@ -90,6 +88,7 @@ struct tinywl_view {
 	struct wl_listener request_resize;
 	struct wl_listener request_maximize;
 	struct wl_listener request_fullscreen;
+	int x, y;
 };
 
 struct tinywl_keyboard {
@@ -120,12 +119,10 @@ static void focus_view(struct tinywl_view *view, struct wlr_surface *surface) {
 		 * it no longer has focus and the client will repaint accordingly, e.g.
 		 * stop displaying a caret.
 		 */
-		struct wlr_xdg_surface *previous =
-			wlr_xdg_surface_try_from_wlr_surface(seat->keyboard_state.focused_surface);
-		assert(previous != NULL && previous->role == WLR_XDG_SURFACE_ROLE_TOPLEVEL);
-		if (previous->toplevel != NULL) {
-			wlr_xdg_toplevel_set_activated(previous->toplevel, false);
-		}
+		struct wlr_xdg_surface *previous = wlr_xdg_surface_from_wlr_surface(
+					seat->keyboard_state.focused_surface);
+		assert(previous->role == WLR_XDG_SURFACE_ROLE_TOPLEVEL);
+		wlr_xdg_toplevel_set_activated(previous->toplevel, false);
 	}
 	struct wlr_keyboard *keyboard = wlr_seat_get_keyboard(seat);
 	/* Move the view to the front */
@@ -243,7 +240,8 @@ static void server_new_keyboard(struct tinywl_server *server,
 		struct wlr_input_device *device) {
 	struct wlr_keyboard *wlr_keyboard = wlr_keyboard_from_input_device(device);
 
-	struct tinywl_keyboard *keyboard = calloc(1, sizeof(*keyboard));
+	struct tinywl_keyboard *keyboard =
+		calloc(1, sizeof(struct tinywl_keyboard));
 	keyboard->server = server;
 	keyboard->wlr_keyboard = wlr_keyboard;
 
@@ -350,7 +348,7 @@ static struct tinywl_view *desktop_view_at(
 	}
 	struct wlr_scene_buffer *scene_buffer = wlr_scene_buffer_from_node(node);
 	struct wlr_scene_surface *scene_surface =
-		wlr_scene_surface_try_from_buffer(scene_buffer);
+		wlr_scene_surface_from_buffer(scene_buffer);
 	if (!scene_surface) {
 		return NULL;
 	}
@@ -365,18 +363,12 @@ static struct tinywl_view *desktop_view_at(
 	return tree->node.data;
 }
 
-static void reset_cursor_mode(struct tinywl_server *server) {
-	/* Reset the cursor mode to passthrough. */
-	server->cursor_mode = TINYWL_CURSOR_PASSTHROUGH;
-	server->grabbed_view = NULL;
-}
-
 static void process_cursor_move(struct tinywl_server *server, uint32_t time) {
 	/* Move the grabbed view to the new position. */
 	struct tinywl_view *view = server->grabbed_view;
-	wlr_scene_node_set_position(&view->scene_tree->node,
-		server->cursor->x - server->grab_x,
-		server->cursor->y - server->grab_y);
+	view->x = server->cursor->x - server->grab_x;
+	view->y = server->cursor->y - server->grab_y;
+	wlr_scene_node_set_position(&view->scene_tree->node, view->x, view->y);
 }
 
 static void process_cursor_resize(struct tinywl_server *server, uint32_t time) {
@@ -423,8 +415,9 @@ static void process_cursor_resize(struct tinywl_server *server, uint32_t time) {
 
 	struct wlr_box geo_box;
 	wlr_xdg_surface_get_geometry(view->xdg_toplevel->base, &geo_box);
-	wlr_scene_node_set_position(&view->scene_tree->node,
-		new_left - geo_box.x, new_top - geo_box.y);
+	view->x = new_left - geo_box.x;
+	view->y = new_top - geo_box.y;
+	wlr_scene_node_set_position(&view->scene_tree->node, view->x, view->y);
 
 	int new_width = new_right - new_left;
 	int new_height = new_bottom - new_top;
@@ -451,7 +444,8 @@ static void process_cursor_motion(struct tinywl_server *server, uint32_t time) {
 		/* If there's no view under the cursor, set the cursor image to a
 		 * default. This is what makes the cursor image appear when you move it
 		 * around the screen, not over any views. */
-		wlr_cursor_set_xcursor(server->cursor, server->cursor_mgr, "default");
+		wlr_xcursor_manager_set_cursor_image(
+				server->cursor_mgr, "left_ptr", server->cursor);
 	}
 	if (surface) {
 		/*
@@ -521,7 +515,7 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
 			server->cursor->x, server->cursor->y, &surface, &sx, &sy);
 	if (event->state == WLR_BUTTON_RELEASED) {
 		/* If you released any buttons, we exit interactive move/resize mode. */
-		reset_cursor_mode(server);
+		server->cursor_mode = TINYWL_CURSOR_PASSTHROUGH;
 	} else {
 		/* Focus that client if the button was _pressed_ */
 		focus_view(view, surface);
@@ -561,27 +555,17 @@ static void output_frame(struct wl_listener *listener, void *data) {
 		scene, output->wlr_output);
 
 	/* Render the scene if needed and commit the output */
-	wlr_scene_output_commit(scene_output, NULL);
+	wlr_scene_output_commit(scene_output);
 
 	struct timespec now;
 	clock_gettime(CLOCK_MONOTONIC, &now);
 	wlr_scene_output_send_frame_done(scene_output, &now);
 }
 
-static void output_request_state(struct wl_listener *listener, void *data) {
-	/* This function is called when the backend requests a new state for
-	 * the output. For example, Wayland and X11 backends request a new mode
-	 * when the output window is resized. */
-	struct tinywl_output *output = wl_container_of(listener, output, request_state);
-	const struct wlr_output_event_request_state *event = data;
-	wlr_output_commit_state(output->wlr_output, event->state);
-}
-
 static void output_destroy(struct wl_listener *listener, void *data) {
 	struct tinywl_output *output = wl_container_of(listener, output, destroy);
 
 	wl_list_remove(&output->frame.link);
-	wl_list_remove(&output->request_state.link);
 	wl_list_remove(&output->destroy.link);
 	wl_list_remove(&output->link);
 	free(output);
@@ -598,39 +582,30 @@ static void server_new_output(struct wl_listener *listener, void *data) {
 	 * and our renderer. Must be done once, before commiting the output */
 	wlr_output_init_render(wlr_output, server->allocator, server->renderer);
 
-	/* The output may be disabled, switch it on. */
-	struct wlr_output_state state;
-	wlr_output_state_init(&state);
-	wlr_output_state_set_enabled(&state, true);
-
 	/* Some backends don't have modes. DRM+KMS does, and we need to set a mode
 	 * before we can use the output. The mode is a tuple of (width, height,
 	 * refresh rate), and each monitor supports only a specific set of modes. We
 	 * just pick the monitor's preferred mode, a more sophisticated compositor
 	 * would let the user configure it. */
-	struct wlr_output_mode *mode = wlr_output_preferred_mode(wlr_output);
-	if (mode != NULL) {
-		wlr_output_state_set_mode(&state, mode);
+	if (!wl_list_empty(&wlr_output->modes)) {
+		struct wlr_output_mode *mode = wlr_output_preferred_mode(wlr_output);
+		wlr_output_set_mode(wlr_output, mode);
+		wlr_output_enable(wlr_output, true);
+		if (!wlr_output_commit(wlr_output)) {
+			return;
+		}
 	}
 
-	/* Atomically applies the new output state. */
-	wlr_output_commit_state(wlr_output, &state);
-	wlr_output_state_finish(&state);
-
 	/* Allocates and configures our state for this output */
-	struct tinywl_output *output = calloc(1, sizeof(*output));
+	struct tinywl_output *output =
+		calloc(1, sizeof(struct tinywl_output));
 	output->wlr_output = wlr_output;
 	output->server = server;
-
-	/* Sets up a listener for the frame event. */
+	/* Sets up a listener for the frame notify event. */
 	output->frame.notify = output_frame;
 	wl_signal_add(&wlr_output->events.frame, &output->frame);
 
-	/* Sets up a listener for the state request event. */
-	output->request_state.notify = output_request_state;
-	wl_signal_add(&wlr_output->events.request_state, &output->request_state);
-
-	/* Sets up a listener for the destroy event. */
+	/* Sets up a listener for the destroy notify event. */
 	output->destroy.notify = output_destroy;
 	wl_signal_add(&wlr_output->events.destroy, &output->destroy);
 
@@ -645,10 +620,7 @@ static void server_new_output(struct wl_listener *listener, void *data) {
 	 * display, which Wayland clients can see to find out information about the
 	 * output (such as DPI, scale factor, manufacturer, etc).
 	 */
-	struct wlr_output_layout_output *l_output = wlr_output_layout_add_auto(server->output_layout,
-		wlr_output);
-	struct wlr_scene_output *scene_output = wlr_scene_output_create(server->scene, wlr_output);
-	wlr_scene_output_layout_add_output(server->scene_layout, l_output, scene_output);
+	wlr_output_layout_add_auto(server->output_layout, wlr_output);
 }
 
 static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
@@ -663,11 +635,6 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
 	/* Called when the surface is unmapped, and should no longer be shown. */
 	struct tinywl_view *view = wl_container_of(listener, view, unmap);
-
-	/* Reset the cursor mode if the grabbed view was unmapped. */
-	if (view == view->server->grabbed_view) {
-		reset_cursor_mode(view->server);
-	}
 
 	wl_list_remove(&view->link);
 }
@@ -704,22 +671,22 @@ static void begin_interactive(struct tinywl_view *view,
 	server->cursor_mode = mode;
 
 	if (mode == TINYWL_CURSOR_MOVE) {
-		server->grab_x = server->cursor->x - view->scene_tree->node.x;
-		server->grab_y = server->cursor->y - view->scene_tree->node.y;
+		server->grab_x = server->cursor->x - view->x;
+		server->grab_y = server->cursor->y - view->y;
 	} else {
 		struct wlr_box geo_box;
 		wlr_xdg_surface_get_geometry(view->xdg_toplevel->base, &geo_box);
 
-		double border_x = (view->scene_tree->node.x + geo_box.x) +
+		double border_x = (view->x + geo_box.x) +
 			((edges & WLR_EDGE_RIGHT) ? geo_box.width : 0);
-		double border_y = (view->scene_tree->node.y + geo_box.y) +
+		double border_y = (view->y + geo_box.y) +
 			((edges & WLR_EDGE_BOTTOM) ? geo_box.height : 0);
 		server->grab_x = server->cursor->x - border_x;
 		server->grab_y = server->cursor->y - border_y;
 
 		server->grab_geobox = geo_box;
-		server->grab_geobox.x += view->scene_tree->node.x;
-		server->grab_geobox.y += view->scene_tree->node.y;
+		server->grab_geobox.x += view->x;
+		server->grab_geobox.y += view->y;
 
 		server->resize_edges = edges;
 	}
@@ -781,9 +748,8 @@ static void server_new_xdg_surface(struct wl_listener *listener, void *data) {
 	 * we always set the user data field of xdg_surfaces to the corresponding
 	 * scene node. */
 	if (xdg_surface->role == WLR_XDG_SURFACE_ROLE_POPUP) {
-		struct wlr_xdg_surface *parent =
-			wlr_xdg_surface_try_from_wlr_surface(xdg_surface->popup->parent);
-		assert(parent != NULL);
+		struct wlr_xdg_surface *parent = wlr_xdg_surface_from_wlr_surface(
+			xdg_surface->popup->parent);
 		struct wlr_scene_tree *parent_tree = parent->data;
 		xdg_surface->data = wlr_scene_xdg_surface_create(
 			parent_tree, xdg_surface);
@@ -792,7 +758,8 @@ static void server_new_xdg_surface(struct wl_listener *listener, void *data) {
 	assert(xdg_surface->role == WLR_XDG_SURFACE_ROLE_TOPLEVEL);
 
 	/* Allocate a tinywl_view for this surface */
-	struct tinywl_view *view = calloc(1, sizeof(*view));
+	struct tinywl_view *view =
+		calloc(1, sizeof(struct tinywl_view));
 	view->server = server;
 	view->xdg_toplevel = xdg_surface->toplevel;
 	view->scene_tree = wlr_scene_xdg_surface_create(
@@ -802,9 +769,9 @@ static void server_new_xdg_surface(struct wl_listener *listener, void *data) {
 
 	/* Listen to the various events it can emit */
 	view->map.notify = xdg_toplevel_map;
-	wl_signal_add(&xdg_surface->surface->events.map, &view->map);
+	wl_signal_add(&xdg_surface->events.map, &view->map);
 	view->unmap.notify = xdg_toplevel_unmap;
-	wl_signal_add(&xdg_surface->surface->events.unmap, &view->unmap);
+	wl_signal_add(&xdg_surface->events.unmap, &view->unmap);
 	view->destroy.notify = xdg_toplevel_destroy;
 	wl_signal_add(&xdg_surface->events.destroy, &view->destroy);
 
@@ -842,7 +809,7 @@ int main(int argc, char *argv[]) {
 		return 0;
 	}
 
-	struct tinywl_server server = {0};
+	struct tinywl_server server;
 	/* The Wayland display is managed by libwayland. It handles accepting
 	 * clients from the Unix socket, manging Wayland globals, and so on. */
 	server.wl_display = wl_display_create();
@@ -850,7 +817,7 @@ int main(int argc, char *argv[]) {
 	 * output hardware. The autocreate option will choose the most suitable
 	 * backend based on the current environment, such as opening an X11 window
 	 * if an X11 server is running. */
-	server.backend = wlr_backend_autocreate(server.wl_display, NULL);
+	server.backend = wlr_backend_autocreate(server.wl_display);
 	if (server.backend == NULL) {
 		wlr_log(WLR_ERROR, "failed to create wlr_backend");
 		return 1;
@@ -872,7 +839,7 @@ int main(int argc, char *argv[]) {
 	 * The allocator is the bridge between the renderer and the backend. It
 	 * handles the buffer creation, allowing wlroots to render onto the
 	 * screen */
-	server.allocator = wlr_allocator_autocreate(server.backend,
+	 server.allocator = wlr_allocator_autocreate(server.backend,
 		server.renderer);
 	if (server.allocator == NULL) {
 		wlr_log(WLR_ERROR, "failed to create wlr_allocator");
@@ -886,7 +853,7 @@ int main(int argc, char *argv[]) {
 	 * to dig your fingers in and play with their behavior if you want. Note that
 	 * the clients cannot set the selection directly without compositor approval,
 	 * see the handling of the request_set_selection event below.*/
-	wlr_compositor_create(server.wl_display, 5, server.renderer);
+	wlr_compositor_create(server.wl_display, server.renderer);
 	wlr_subcompositor_create(server.wl_display);
 	wlr_data_device_manager_create(server.wl_display);
 
@@ -907,7 +874,7 @@ int main(int argc, char *argv[]) {
 	 * necessary.
 	 */
 	server.scene = wlr_scene_create();
-	server.scene_layout = wlr_scene_attach_output_layout(server.scene, server.output_layout);
+	wlr_scene_attach_output_layout(server.scene, server.output_layout);
 
 	/* Set up xdg-shell version 3. The xdg-shell is a Wayland protocol which is
 	 * used for application windows. For more detail on shells, refer to my
@@ -931,8 +898,9 @@ int main(int argc, char *argv[]) {
 	/* Creates an xcursor manager, another wlroots utility which loads up
 	 * Xcursor themes to source cursor images from and makes sure that cursor
 	 * images are available at all scale factors on the screen (necessary for
-	 * HiDPI support). */
+	 * HiDPI support). We add a cursor theme at scale factor 1 to begin with. */
 	server.cursor_mgr = wlr_xcursor_manager_create(NULL, 24);
+	wlr_xcursor_manager_load(server.cursor_mgr, 1);
 
 	/*
 	 * wlr_cursor *only* displays an image on screen. It does not move around
@@ -1007,12 +975,8 @@ int main(int argc, char *argv[]) {
 			socket);
 	wl_display_run(server.wl_display);
 
-	/* Once wl_display_run returns, we destroy all clients then shut down the
-	 * server. */
+	/* Once wl_display_run returns, we shut down the server. */
 	wl_display_destroy_clients(server.wl_display);
-	wlr_scene_node_destroy(&server.scene->tree.node);
-	wlr_xcursor_manager_destroy(server.cursor_mgr);
-	wlr_output_layout_destroy(server.output_layout);
 	wl_display_destroy(server.wl_display);
 	return 0;
 }

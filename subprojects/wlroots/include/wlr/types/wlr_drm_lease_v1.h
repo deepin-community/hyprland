@@ -71,7 +71,8 @@ struct wlr_drm_lease_request_v1 {
 	struct wlr_drm_lease_connector_v1 **connectors;
 	size_t n_connectors;
 
-	struct wl_resource *lease_resource;
+	/** NULL until the lease is submitted */
+	struct wlr_drm_lease_v1 *lease;
 
 	bool invalid;
 
@@ -87,7 +88,7 @@ struct wlr_drm_lease_v1 {
 	struct wlr_drm_lease_connector_v1 **connectors;
 	size_t n_connectors;
 
-	struct wl_list link; // wlr_drm_lease_device_v1.leases
+	struct wl_list link; // wlr_drm_lease_device_v1::leases
 
 	struct wl_listener destroy;
 

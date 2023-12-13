@@ -10,7 +10,6 @@
 #include <wlr/backend/drm.h>
 #include <wlr/backend/session.h>
 #include <wlr/render/drm_format_set.h>
-#include <wlr/types/wlr_output_layer.h>
 #include <xf86drmMode.h>
 #include "backend/drm/iface.h"
 #include "backend/drm/properties.h"
@@ -23,6 +22,8 @@ struct wlr_drm_plane {
 	/* Only initialized on multi-GPU setups */
 	struct wlr_drm_surface mgpu_surf;
 
+	/* Buffer to be submitted to the kernel on the next page-flip */
+	struct wlr_drm_fb *pending_fb;
 	/* Buffer submitted to the kernel, will be presented on next vblank */
 	struct wlr_drm_fb *queued_fb;
 	/* Buffer currently displayed on screen */
@@ -31,42 +32,18 @@ struct wlr_drm_plane {
 	struct wlr_drm_format_set formats;
 
 	union wlr_drm_plane_props props;
-
-	uint32_t initial_crtc_id;
-	struct liftoff_plane *liftoff;
-	struct liftoff_layer *liftoff_layer;
-};
-
-struct wlr_drm_layer {
-	struct wlr_output_layer *wlr;
-	struct liftoff_layer *liftoff;
-	struct wlr_addon addon; // wlr_output_layer.addons
-	struct wl_list link; // wlr_drm_crtc.layers
-
-	/* Buffer to be submitted to the kernel on the next page-flip */
-	struct wlr_drm_fb *pending_fb;
-	/* Buffer submitted to the kernel, will be presented on next vblank */
-	struct wlr_drm_fb *queued_fb;
-	/* Buffer currently displayed on screen */
-	struct wlr_drm_fb *current_fb;
-
-	// One entry per wlr_drm_backend.planes
-	bool *candidate_planes;
 };
 
 struct wlr_drm_crtc {
 	uint32_t id;
 	struct wlr_drm_lease *lease;
-	struct liftoff_output *liftoff;
-	struct liftoff_layer *liftoff_composition_layer;
-	struct wl_list layers; // wlr_drm_layer.link
 
 	// Atomic modesetting only
 	uint32_t mode_id;
 	uint32_t gamma_lut;
 
 	// Legacy only
-	int legacy_gamma_size;
+	drmModeCrtc *legacy_crtc;
 
 	struct wlr_drm_plane *primary;
 	struct wlr_drm_plane *cursor;
@@ -81,17 +58,14 @@ struct wlr_drm_backend {
 	const struct wlr_drm_interface *iface;
 	clockid_t clock;
 	bool addfb2_modifiers;
+	struct udev_hwdb *hwdb;
 
 	int fd;
 	char *name;
 	struct wlr_device *dev;
-	struct liftoff_device *liftoff;
 
 	size_t num_crtcs;
 	struct wlr_drm_crtc *crtcs;
-
-	size_t num_planes;
-	struct wlr_drm_plane *planes;
 
 	struct wl_display *display;
 	struct wl_event_source *drm_event;
@@ -104,7 +78,7 @@ struct wlr_drm_backend {
 	struct wl_listener dev_remove;
 
 	struct wl_list fbs; // wlr_drm_fb.link
-	struct wl_list connectors; // wlr_drm_connector.link
+	struct wl_list outputs;
 
 	/* Only initialized on multi-GPU setups */
 	struct wlr_drm_renderer mgpu_renderer;
@@ -114,8 +88,15 @@ struct wlr_drm_backend {
 	uint64_t cursor_width, cursor_height;
 
 	struct wlr_drm_format_set mgpu_formats;
+};
 
-	bool supports_tearing_page_flips;
+enum wlr_drm_connector_status {
+	// Connector is available but no output is plugged in
+	WLR_DRM_CONN_DISCONNECTED,
+	// An output just has been plugged in and is waiting for a modeset
+	WLR_DRM_CONN_NEEDS_MODESET,
+	WLR_DRM_CONN_CLEANUP,
+	WLR_DRM_CONN_CONNECTED,
 };
 
 struct wlr_drm_mode {
@@ -128,7 +109,6 @@ struct wlr_drm_connector_state {
 	bool modeset;
 	bool active;
 	drmModeModeInfo mode;
-	struct wlr_drm_fb *primary_fb;
 };
 
 struct wlr_drm_connector {
@@ -136,9 +116,10 @@ struct wlr_drm_connector {
 
 	struct wlr_drm_backend *backend;
 	char name[24];
-	drmModeConnection status;
+	enum wlr_drm_connector_status status;
+	bool desired_enabled;
 	uint32_t id;
-	uint64_t max_bpc_bounds[2];
+	uint64_t max_bpc;
 	struct wlr_drm_lease *lease;
 
 	struct wlr_drm_crtc *crtc;
@@ -150,10 +131,8 @@ struct wlr_drm_connector {
 	int cursor_x, cursor_y;
 	int cursor_width, cursor_height;
 	int cursor_hotspot_x, cursor_hotspot_y;
-	/* Buffer to be submitted to the kernel on the next page-flip */
-	struct wlr_drm_fb *cursor_pending_fb;
 
-	struct wl_list link; // wlr_drm_backend.connectors
+	struct wl_list link;
 
 	/* CRTC ID if a page-flip is pending, zero otherwise.
 	 *
@@ -183,9 +162,7 @@ size_t drm_crtc_get_gamma_lut_size(struct wlr_drm_backend *drm,
 	struct wlr_drm_crtc *crtc);
 void drm_lease_destroy(struct wlr_drm_lease *lease);
 
-struct wlr_drm_fb *get_next_cursor_fb(struct wlr_drm_connector *conn);
-struct wlr_drm_layer *get_drm_layer(struct wlr_drm_backend *drm,
-	struct wlr_output_layer *layer);
+struct wlr_drm_fb *plane_get_next_fb(struct wlr_drm_plane *plane);
 
 #define wlr_drm_conn_log(conn, verb, fmt, ...) \
 	wlr_log(verb, "connector %s: " fmt, conn->name, ##__VA_ARGS__)

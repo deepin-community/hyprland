@@ -34,10 +34,9 @@ void xwm_selection_transfer_destroy_property_reply(
 
 void xwm_selection_transfer_init(struct wlr_xwm_selection_transfer *transfer,
 		struct wlr_xwm_selection *selection) {
-	*transfer = (struct wlr_xwm_selection_transfer){
-		.selection = selection,
-		.wl_client_fd = -1,
-	};
+	memset(transfer, 0, sizeof(*transfer));
+	transfer->selection = selection;
+	transfer->wl_client_fd = -1;
 }
 
 void xwm_selection_transfer_destroy(
@@ -176,13 +175,13 @@ int xwm_handle_selection_event(struct wlr_xwm *xwm,
 
 void xwm_selection_init(struct wlr_xwm_selection *selection,
 		struct wlr_xwm *xwm, xcb_atom_t atom) {
-	*selection = (struct wlr_xwm_selection){
-		.xwm = xwm,
-		.atom = atom,
-		.window = xcb_generate_id(xwm->xcb_conn),
-	};
+	memset(selection, 0, sizeof(*selection));
 	wl_list_init(&selection->incoming);
 	wl_list_init(&selection->outgoing);
+
+	selection->xwm = xwm;
+	selection->atom = atom;
+	selection->window = xcb_generate_id(xwm->xcb_conn);
 
 	if (atom == xwm->atoms[DND_SELECTION]) {
 		xcb_create_window(

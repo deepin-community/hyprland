@@ -1,5 +1,4 @@
 #define _POSIX_C_SOURCE 200809L
-#include <drm_fourcc.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <wlr/util/log.h>
@@ -50,7 +49,7 @@ struct atomic {
 };
 
 static void atomic_begin(struct atomic *atom) {
-	*atom = (struct atomic){0};
+	memset(atom, 0, sizeof(*atom));
 
 	atom->req = drmModeAtomicAlloc();
 	if (!atom->req) {
@@ -93,7 +92,7 @@ static void atomic_add(struct atomic *atom, uint32_t id, uint32_t prop, uint64_t
 	}
 }
 
-bool create_mode_blob(struct wlr_drm_backend *drm,
+static bool create_mode_blob(struct wlr_drm_backend *drm,
 		struct wlr_drm_connector *conn,
 		const struct wlr_drm_connector_state *state, uint32_t *blob_id) {
 	if (!state->active) {
@@ -110,14 +109,14 @@ bool create_mode_blob(struct wlr_drm_backend *drm,
 	return true;
 }
 
-bool create_gamma_lut_blob(struct wlr_drm_backend *drm,
+static bool create_gamma_lut_blob(struct wlr_drm_backend *drm,
 		size_t size, const uint16_t *lut, uint32_t *blob_id) {
 	if (size == 0) {
 		*blob_id = 0;
 		return true;
 	}
 
-	struct drm_color_lut *gamma = malloc(size * sizeof(*gamma));
+	struct drm_color_lut *gamma = malloc(size * sizeof(struct drm_color_lut));
 	if (gamma == NULL) {
 		wlr_log(WLR_ERROR, "Failed to allocate gamma table");
 		return false;
@@ -133,7 +132,7 @@ bool create_gamma_lut_blob(struct wlr_drm_backend *drm,
 	}
 
 	if (drmModeCreatePropertyBlob(drm->fd, gamma,
-			size * sizeof(*gamma), blob_id) != 0) {
+			size * sizeof(struct drm_color_lut), blob_id) != 0) {
 		wlr_log_errno(WLR_ERROR, "Unable to create gamma LUT property blob");
 		free(gamma);
 		return false;
@@ -141,63 +140,6 @@ bool create_gamma_lut_blob(struct wlr_drm_backend *drm,
 	free(gamma);
 
 	return true;
-}
-
-bool create_fb_damage_clips_blob(struct wlr_drm_backend *drm,
-		int width, int height, const pixman_region32_t *damage, uint32_t *blob_id) {
-	if (!pixman_region32_not_empty(damage)) {
-		*blob_id = 0;
-		return true;
-	}
-
-	pixman_region32_t clipped;
-	pixman_region32_init(&clipped);
-	pixman_region32_intersect_rect(&clipped, damage, 0, 0, width, height);
-
-	int rects_len;
-	const pixman_box32_t *rects = pixman_region32_rectangles(&clipped, &rects_len);
-	int ret = drmModeCreatePropertyBlob(drm->fd, rects, sizeof(*rects) * rects_len, blob_id);
-	pixman_region32_fini(&clipped);
-	if (ret != 0) {
-		wlr_log_errno(WLR_ERROR, "Failed to create FB_DAMAGE_CLIPS property blob");
-		return false;
-	}
-
-	return true;
-}
-
-static uint64_t max_bpc_for_format(uint32_t format) {
-	switch (format) {
-	case DRM_FORMAT_XRGB2101010:
-	case DRM_FORMAT_ARGB2101010:
-	case DRM_FORMAT_XBGR2101010:
-	case DRM_FORMAT_ABGR2101010:
-		return 10;
-	case DRM_FORMAT_XBGR16161616F:
-	case DRM_FORMAT_ABGR16161616F:
-	case DRM_FORMAT_XBGR16161616:
-	case DRM_FORMAT_ABGR16161616:
-		return 16;
-	default:
-		return 8;
-	}
-}
-
-static uint64_t pick_max_bpc(struct wlr_drm_connector *conn, struct wlr_drm_fb *fb) {
-	uint32_t format = DRM_FORMAT_INVALID;
-	struct wlr_dmabuf_attributes attribs = {0};
-	if (wlr_buffer_get_dmabuf(fb->wlr_buf, &attribs)) {
-		format = attribs.format;
-	}
-
-	uint64_t target_bpc = max_bpc_for_format(format);
-	if (target_bpc < conn->max_bpc_bounds[0]) {
-		target_bpc = conn->max_bpc_bounds[0];
-	}
-	if (target_bpc > conn->max_bpc_bounds[1]) {
-		target_bpc = conn->max_bpc_bounds[1];
-	}
-	return target_bpc;
 }
 
 static void commit_blob(struct wlr_drm_backend *drm,
@@ -229,15 +171,13 @@ static void plane_disable(struct atomic *atom, struct wlr_drm_plane *plane) {
 }
 
 static void set_plane_props(struct atomic *atom, struct wlr_drm_backend *drm,
-		struct wlr_drm_plane *plane, struct wlr_drm_fb *fb, uint32_t crtc_id,
-		int32_t x, int32_t y) {
+		struct wlr_drm_plane *plane, uint32_t crtc_id, int32_t x, int32_t y) {
 	uint32_t id = plane->id;
 	const union wlr_drm_plane_props *props = &plane->props;
-
+	struct wlr_drm_fb *fb = plane_get_next_fb(plane);
 	if (fb == NULL) {
-		wlr_log(WLR_ERROR, "Failed to acquire FB for plane %"PRIu32, plane->id);
-		atom->failed = true;
-		return;
+		wlr_log(WLR_ERROR, "Failed to acquire FB");
+		goto error;
 	}
 
 	uint32_t width = fb->wlr_buf->width;
@@ -254,6 +194,12 @@ static void set_plane_props(struct atomic *atom, struct wlr_drm_backend *drm,
 	atomic_add(atom, id, props->crtc_id, crtc_id);
 	atomic_add(atom, id, props->crtc_x, (uint64_t)x);
 	atomic_add(atom, id, props->crtc_y, (uint64_t)y);
+
+	return;
+
+error:
+	wlr_log(WLR_ERROR, "Failed to set plane %"PRIu32" properties", plane->id);
+	atom->failed = true;
 }
 
 static bool atomic_crtc_commit(struct wlr_drm_connector *conn,
@@ -294,18 +240,22 @@ static bool atomic_crtc_commit(struct wlr_drm_connector *conn,
 
 	uint32_t fb_damage_clips = 0;
 	if ((state->base->committed & WLR_OUTPUT_STATE_DAMAGE) &&
+			pixman_region32_not_empty((pixman_region32_t *)&state->base->damage) &&
 			crtc->primary->props.fb_damage_clips != 0) {
-		create_fb_damage_clips_blob(drm, state->primary_fb->wlr_buf->width,
-			state->primary_fb->wlr_buf->height, &state->base->damage, &fb_damage_clips);
+		int rects_len;
+		const pixman_box32_t *rects = pixman_region32_rectangles(
+			(pixman_region32_t *)&state->base->damage, &rects_len);
+		if (drmModeCreatePropertyBlob(drm->fd, rects,
+				sizeof(*rects) * rects_len, &fb_damage_clips) != 0) {
+			wlr_log_errno(WLR_ERROR, "Failed to create FB_DAMAGE_CLIPS property blob");
+		}
 	}
 
 	bool prev_vrr_enabled =
 		output->adaptive_sync_status == WLR_OUTPUT_ADAPTIVE_SYNC_ENABLED;
 	bool vrr_enabled = prev_vrr_enabled;
-	if ((state->base->committed & WLR_OUTPUT_STATE_ADAPTIVE_SYNC_ENABLED)) {
-		if (!drm_connector_supports_vrr(conn)) {
-			return false;
-		}
+	if ((state->base->committed & WLR_OUTPUT_STATE_ADAPTIVE_SYNC_ENABLED) &&
+			drm_connector_supports_vrr(conn)) {
 		vrr_enabled = state->base->adaptive_sync_enabled;
 	}
 
@@ -334,8 +284,8 @@ static bool atomic_crtc_commit(struct wlr_drm_connector *conn,
 		atomic_add(&atom, conn->id, conn->props.content_type,
 			DRM_MODE_CONTENT_TYPE_GRAPHICS);
 	}
-	if (modeset && active && conn->props.max_bpc != 0 && conn->max_bpc_bounds[1] != 0) {
-		atomic_add(&atom, conn->id, conn->props.max_bpc, pick_max_bpc(conn, state->primary_fb));
+	if (active && conn->props.max_bpc != 0 && conn->max_bpc > 0) {
+		atomic_add(&atom, conn->id, conn->props.max_bpc, conn->max_bpc);
 	}
 	atomic_add(&atom, crtc->id, crtc->props.mode_id, mode_id);
 	atomic_add(&atom, crtc->id, crtc->props.active, active);
@@ -346,16 +296,15 @@ static bool atomic_crtc_commit(struct wlr_drm_connector *conn,
 		if (crtc->props.vrr_enabled != 0) {
 			atomic_add(&atom, crtc->id, crtc->props.vrr_enabled, vrr_enabled);
 		}
-		set_plane_props(&atom, drm, crtc->primary, state->primary_fb, crtc->id,
-			0, 0);
+		set_plane_props(&atom, drm, crtc->primary, crtc->id, 0, 0);
 		if (crtc->primary->props.fb_damage_clips != 0) {
 			atomic_add(&atom, crtc->primary->id,
 				crtc->primary->props.fb_damage_clips, fb_damage_clips);
 		}
 		if (crtc->cursor) {
 			if (drm_connector_is_cursor_visible(conn)) {
-				set_plane_props(&atom, drm, crtc->cursor, get_next_cursor_fb(conn),
-					crtc->id, conn->cursor_x, conn->cursor_y);
+				set_plane_props(&atom, drm, crtc->cursor, crtc->id,
+					conn->cursor_x, conn->cursor_y);
 			} else {
 				plane_disable(&atom, crtc->cursor);
 			}

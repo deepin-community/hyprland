@@ -10,9 +10,6 @@
 #define WLR_TYPES_WLR_DAMAGE_RING_H
 
 #include <stdbool.h>
-#include <stddef.h>
-#include <stdint.h>
-#include <pixman.h>
 
 /* For triple buffering, a history of two frames is required. */
 #define WLR_DAMAGE_RING_PREVIOUS_LEN 2
@@ -52,7 +49,7 @@ void wlr_damage_ring_set_bounds(struct wlr_damage_ring *ring,
  * Returns true if the region intersects the ring bounds, false otherwise.
  */
 bool wlr_damage_ring_add(struct wlr_damage_ring *ring,
-	const pixman_region32_t *damage);
+	pixman_region32_t *damage);
 
 /**
  * Add a box to the current damage.

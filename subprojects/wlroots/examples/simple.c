@@ -62,22 +62,14 @@ static void output_frame_notify(struct wl_listener *listener, void *data) {
 		sample->dec = inc;
 	}
 
-	struct wlr_output_state state;
-	wlr_output_state_init(&state);
-	struct wlr_render_pass *pass = wlr_output_begin_render_pass(wlr_output, &state, NULL, NULL);
-	wlr_render_pass_add_rect(pass, &(struct wlr_render_rect_options){
-		.box = { .width = wlr_output->width, .height = wlr_output->height },
-		.color = {
-			.r = sample->color[0],
-			.g = sample->color[1],
-			.b = sample->color[2],
-			.a = sample->color[3],
-		},
-	});
-	wlr_render_pass_submit(pass);
+	wlr_output_attach_render(wlr_output, NULL);
 
-	wlr_output_commit_state(wlr_output, &state);
-	wlr_output_state_finish(&state);
+	struct wlr_renderer *renderer = sample->renderer;
+	wlr_renderer_begin(renderer, wlr_output->width, wlr_output->height);
+	wlr_renderer_clear(renderer, sample->color);
+	wlr_renderer_end(renderer);
+
+	wlr_output_commit(wlr_output);
 	sample->last_frame = now;
 }
 
@@ -97,7 +89,8 @@ static void new_output_notify(struct wl_listener *listener, void *data) {
 
 	wlr_output_init_render(output, sample->allocator, sample->renderer);
 
-	struct sample_output *sample_output = calloc(1, sizeof(*sample_output));
+	struct sample_output *sample_output =
+		calloc(1, sizeof(struct sample_output));
 	sample_output->output = output;
 	sample_output->sample = sample;
 	wl_signal_add(&output->events.frame, &sample_output->frame);
@@ -105,15 +98,12 @@ static void new_output_notify(struct wl_listener *listener, void *data) {
 	wl_signal_add(&output->events.destroy, &sample_output->destroy);
 	sample_output->destroy.notify = output_remove_notify;
 
-	struct wlr_output_state state;
-	wlr_output_state_init(&state);
-	wlr_output_state_set_enabled(&state, true);
 	struct wlr_output_mode *mode = wlr_output_preferred_mode(output);
 	if (mode != NULL) {
-		wlr_output_state_set_mode(&state, mode);
+		wlr_output_set_mode(output, mode);
 	}
-	wlr_output_commit_state(output, &state);
-	wlr_output_state_finish(&state);
+
+	wlr_output_commit(sample_output->output);
 }
 
 static void keyboard_key_notify(struct wl_listener *listener, void *data) {
@@ -145,7 +135,8 @@ static void new_input_notify(struct wl_listener *listener, void *data) {
 	struct sample_state *sample = wl_container_of(listener, sample, new_input);
 	switch (device->type) {
 	case WLR_INPUT_DEVICE_KEYBOARD:;
-		struct sample_keyboard *keyboard = calloc(1, sizeof(*keyboard));
+		struct sample_keyboard *keyboard =
+			calloc(1, sizeof(struct sample_keyboard));
 		keyboard->wlr_keyboard = wlr_keyboard_from_input_device(device);
 		keyboard->sample = sample;
 		wl_signal_add(&device->events.destroy, &keyboard->destroy);
@@ -181,7 +172,7 @@ int main(void) {
 		.last_frame = { 0 },
 		.display = display
 	};
-	struct wlr_backend *backend = wlr_backend_autocreate(display, NULL);
+	struct wlr_backend *backend = wlr_backend_autocreate(display);
 	if (!backend) {
 		exit(1);
 	}

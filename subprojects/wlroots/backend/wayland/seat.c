@@ -18,6 +18,7 @@
 #include <wlr/util/log.h>
 
 #include "backend/wayland.h"
+#include "util/signal.h"
 #include "util/time.h"
 
 static void keyboard_handle_keymap(void *data, struct wl_keyboard *wl_keyboard,
@@ -112,7 +113,7 @@ void init_seat_keyboard(struct wlr_wl_seat *seat) {
 	wl_keyboard_add_listener(seat->wl_keyboard, &keyboard_listener,
 		&seat->wlr_keyboard);
 
-	wl_signal_emit_mutable(&seat->backend->backend.events.new_input,
+	wlr_signal_emit_safe(&seat->backend->backend.events.new_input,
 		&seat->wlr_keyboard.base);
 }
 
@@ -141,30 +142,13 @@ static void touch_handle_down(void *data, struct wl_touch *wl_touch,
 	struct wlr_wl_seat *seat = data;
 	struct wlr_touch *touch = &seat->wlr_touch;
 
-	struct wlr_wl_touch_points *points = &seat->touch_points;
-	assert(points->len != sizeof(points->ids) / sizeof(points->ids[0]));
-	points->ids[points->len++] = id;
-
 	struct wlr_touch_down_event event = {
 		.touch = touch,
 		.time_msec = time,
 		.touch_id = id,
 	};
 	touch_coordinates_to_absolute(seat, x, y, &event.x, &event.y);
-	wl_signal_emit_mutable(&touch->events.down, &event);
-}
-
-static bool remove_touch_point(struct wlr_wl_touch_points *points, int32_t id) {
-	size_t i = 0;
-	for (; i < points->len; i++) {
-		if (points->ids[i] == id) {
-			size_t remaining = points->len - i - 1;
-			memmove(&points->ids[i], &points->ids[i + 1], remaining * sizeof(id));
-			points->len--;
-			return true;
-		}
-	}
-	return false;
+	wlr_signal_emit_safe(&touch->events.down, &event);
 }
 
 static void touch_handle_up(void *data, struct wl_touch *wl_touch,
@@ -172,14 +156,12 @@ static void touch_handle_up(void *data, struct wl_touch *wl_touch,
 	struct wlr_wl_seat *seat = data;
 	struct wlr_touch *touch = &seat->wlr_touch;
 
-	remove_touch_point(&seat->touch_points, id);
-
 	struct wlr_touch_up_event event = {
 		.touch = touch,
 		.time_msec = time,
 		.touch_id = id,
 	};
-	wl_signal_emit_mutable(&touch->events.up, &event);
+	wlr_signal_emit_safe(&touch->events.up, &event);
 }
 
 static void touch_handle_motion(void *data, struct wl_touch *wl_touch,
@@ -194,28 +176,16 @@ static void touch_handle_motion(void *data, struct wl_touch *wl_touch,
 	};
 
 	touch_coordinates_to_absolute(seat, x, y, &event.x, &event.y);
-	wl_signal_emit_mutable(&touch->events.motion, &event);
+	wlr_signal_emit_safe(&touch->events.motion, &event);
 }
 
 static void touch_handle_frame(void *data, struct wl_touch *wl_touch) {
 	struct wlr_wl_seat *seat = data;
-	wl_signal_emit_mutable(&seat->wlr_touch.events.frame, NULL);
+	wlr_signal_emit_safe(&seat->wlr_touch.events.frame, NULL);
 }
 
 static void touch_handle_cancel(void *data, struct wl_touch *wl_touch) {
-	struct wlr_wl_seat *seat = data;
-	struct wlr_touch *touch = &seat->wlr_touch;
-
-	// wayland's cancel event applies to all active touch points
-	for (size_t i = 0; i < seat->touch_points.len; i++) {
-		struct wlr_touch_cancel_event event = {
-			.touch = touch,
-			.time_msec = 0,
-			.touch_id = seat->touch_points.ids[i],
-		};
-		wl_signal_emit_mutable(&touch->events.cancel, &event);
-	}
-	seat->touch_points.len = 0;
+	// no-op
 }
 
 static void touch_handle_shape(void *data, struct wl_touch *wl_touch,
@@ -242,7 +212,7 @@ static const struct wlr_touch_impl touch_impl = {
 	.name = "wl-touch",
 };
 
-void init_seat_touch(struct wlr_wl_seat *seat) {
+static void init_seat_touch(struct wlr_wl_seat *seat) {
 	assert(seat->wl_touch);
 
 	char name[128] = {0};
@@ -258,52 +228,53 @@ void init_seat_touch(struct wlr_wl_seat *seat) {
 	}
 
 	wl_touch_add_listener(seat->wl_touch, &touch_listener, seat);
-	wl_signal_emit_mutable(&seat->backend->backend.events.new_input,
+	wlr_signal_emit_safe(&seat->backend->backend.events.new_input,
 		&seat->wlr_touch.base);
 }
 
 static const struct wl_seat_listener seat_listener;
 
-bool create_wl_seat(struct wl_seat *wl_seat, struct wlr_wl_backend *wl,
-		uint32_t global_name) {
-	struct wlr_wl_seat *seat = calloc(1, sizeof(*seat));
+bool create_wl_seat(struct wl_seat *wl_seat, struct wlr_wl_backend *wl) {
+	struct wlr_wl_seat *seat = calloc(1, sizeof(struct wlr_wl_seat));
 	if (!seat) {
 		wlr_log_errno(WLR_ERROR, "Allocation failed");
 		return false;
 	}
 	seat->wl_seat = wl_seat;
 	seat->backend = wl;
-	seat->global_name = global_name;
 	wl_list_insert(&wl->seats, &seat->link);
 	wl_seat_add_listener(wl_seat, &seat_listener, seat);
 	return true;
 }
 
-void destroy_wl_seat(struct wlr_wl_seat *seat) {
-	if (seat->wl_touch) {
-		wl_touch_release(seat->wl_touch);
-		wlr_touch_finish(&seat->wlr_touch);
-	}
-	if (seat->wl_pointer) {
-		finish_seat_pointer(seat);
-	}
-	if (seat->wl_keyboard) {
-		wl_keyboard_release(seat->wl_keyboard);
-
-		if (seat->backend->started) {
-			wlr_keyboard_finish(&seat->wlr_keyboard);
+void destroy_wl_seats(struct wlr_wl_backend *wl) {
+	struct wlr_wl_seat *seat, *tmp_seat;
+	wl_list_for_each_safe(seat, tmp_seat, &wl->seats, link) {
+		if (seat->wl_touch) {
+			wl_touch_release(seat->wl_touch);
+			wlr_touch_finish(&seat->wlr_touch);
 		}
-	}
-	if (seat->zwp_tablet_seat_v2) {
-		finish_seat_tablet(seat);
-	}
+		if (seat->wl_pointer) {
+			finish_seat_pointer(seat);
+		}
+		if (seat->wl_keyboard) {
+			wl_keyboard_release(seat->wl_keyboard);
 
-	free(seat->name);
-	assert(seat->wl_seat);
-	wl_seat_destroy(seat->wl_seat);
+			if (seat->backend->started) {
+				wlr_keyboard_finish(&seat->wlr_keyboard);
+			}
+		}
+		if (seat->zwp_tablet_seat_v2) {
+			finish_seat_tablet(seat);
+		}
 
-	wl_list_remove(&seat->link);
-	free(seat);
+		free(seat->name);
+		assert(seat->wl_seat);
+		wl_seat_destroy(seat->wl_seat);
+
+		wl_list_remove(&seat->link);
+		free(seat);
+	}
 }
 
 bool wlr_input_device_is_wl(struct wlr_input_device *dev) {
@@ -362,9 +333,7 @@ static void seat_handle_capabilities(void *data, struct wl_seat *wl_seat,
 		wlr_log(WLR_DEBUG, "seat '%s' offering touch", seat->name);
 
 		seat->wl_touch = wl_seat_get_touch(wl_seat);
-		if (backend->started) {
-			init_seat_touch(seat);
-		}
+		init_seat_touch(seat);
 	}
 	if (!(caps & WL_SEAT_CAPABILITY_TOUCH) && seat->wl_touch != NULL) {
 		wlr_log(WLR_DEBUG, "seat '%s' dropping touch", seat->name);

@@ -1,6 +1,5 @@
 #include <assert.h>
 #include <stdlib.h>
-#include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_scene.h>
 #include <wlr/types/wlr_subcompositor.h>
 #include <wlr/util/addon.h>
@@ -18,8 +17,6 @@ struct wlr_scene_subsurface_tree {
 	struct wl_listener tree_destroy;
 	struct wl_listener surface_destroy;
 	struct wl_listener surface_commit;
-	struct wl_listener surface_map;
-	struct wl_listener surface_unmap;
 	struct wl_listener surface_new_subsurface;
 
 	struct wlr_scene_subsurface_tree *parent; // NULL for the top-level surface
@@ -29,6 +26,8 @@ struct wlr_scene_subsurface_tree {
 	struct wlr_addon surface_addon;
 
 	struct wl_listener subsurface_destroy;
+	struct wl_listener subsurface_map;
+	struct wl_listener subsurface_unmap;
 };
 
 static void subsurface_tree_handle_tree_destroy(struct wl_listener *listener,
@@ -39,12 +38,12 @@ static void subsurface_tree_handle_tree_destroy(struct wl_listener *listener,
 	if (subsurface_tree->parent) {
 		wlr_addon_finish(&subsurface_tree->surface_addon);
 		wl_list_remove(&subsurface_tree->subsurface_destroy.link);
+		wl_list_remove(&subsurface_tree->subsurface_map.link);
+		wl_list_remove(&subsurface_tree->subsurface_unmap.link);
 	}
 	wl_list_remove(&subsurface_tree->tree_destroy.link);
 	wl_list_remove(&subsurface_tree->surface_destroy.link);
 	wl_list_remove(&subsurface_tree->surface_commit.link);
-	wl_list_remove(&subsurface_tree->surface_map.link);
-	wl_list_remove(&subsurface_tree->surface_unmap.link);
 	wl_list_remove(&subsurface_tree->surface_new_subsurface.link);
 	free(subsurface_tree);
 }
@@ -121,18 +120,18 @@ static void subsurface_tree_handle_subsurface_destroy(struct wl_listener *listen
 	wlr_scene_node_destroy(&subsurface_tree->tree->node);
 }
 
-static void subsurface_tree_handle_surface_map(struct wl_listener *listener,
+static void subsurface_tree_handle_subsurface_map(struct wl_listener *listener,
 		void *data) {
 	struct wlr_scene_subsurface_tree *subsurface_tree =
-		wl_container_of(listener, subsurface_tree, surface_map);
+		wl_container_of(listener, subsurface_tree, subsurface_map);
 
 	wlr_scene_node_set_enabled(&subsurface_tree->tree->node, true);
 }
 
-static void subsurface_tree_handle_surface_unmap(struct wl_listener *listener,
+static void subsurface_tree_handle_subsurface_unmap(struct wl_listener *listener,
 		void *data) {
 	struct wlr_scene_subsurface_tree *subsurface_tree =
-		wl_container_of(listener, subsurface_tree, surface_unmap);
+		wl_container_of(listener, subsurface_tree, subsurface_unmap);
 
 	wlr_scene_node_set_enabled(&subsurface_tree->tree->node, false);
 }
@@ -161,12 +160,19 @@ static bool subsurface_tree_create_subsurface(
 	}
 
 	child->parent = parent;
+	wlr_scene_node_set_enabled(&child->tree->node, subsurface->mapped);
 
 	wlr_addon_init(&child->surface_addon, &subsurface->surface->addons,
 		parent, &subsurface_tree_addon_impl);
 
 	child->subsurface_destroy.notify = subsurface_tree_handle_subsurface_destroy;
 	wl_signal_add(&subsurface->events.destroy, &child->subsurface_destroy);
+
+	child->subsurface_map.notify = subsurface_tree_handle_subsurface_map;
+	wl_signal_add(&subsurface->events.map, &child->subsurface_map);
+
+	child->subsurface_unmap.notify = subsurface_tree_handle_subsurface_unmap;
+	wl_signal_add(&subsurface->events.unmap, &child->subsurface_unmap);
 
 	return true;
 }
@@ -228,18 +234,10 @@ static struct wlr_scene_subsurface_tree *scene_surface_tree_create(
 	subsurface_tree->surface_commit.notify = subsurface_tree_handle_surface_commit;
 	wl_signal_add(&surface->events.commit, &subsurface_tree->surface_commit);
 
-	subsurface_tree->surface_map.notify = subsurface_tree_handle_surface_map;
-	wl_signal_add(&surface->events.map, &subsurface_tree->surface_map);
-
-	subsurface_tree->surface_unmap.notify = subsurface_tree_handle_surface_unmap;
-	wl_signal_add(&surface->events.unmap, &subsurface_tree->surface_unmap);
-
 	subsurface_tree->surface_new_subsurface.notify =
 		subsurface_tree_handle_surface_new_subsurface;
 	wl_signal_add(&surface->events.new_subsurface,
 		&subsurface_tree->surface_new_subsurface);
-
-	wlr_scene_node_set_enabled(&subsurface_tree->tree->node, surface->mapped);
 
 	return subsurface_tree;
 

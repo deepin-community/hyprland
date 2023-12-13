@@ -19,6 +19,7 @@
 #include "backend/wayland.h"
 #include "render/drm_format_set.h"
 #include "render/pixel_format.h"
+#include "util/signal.h"
 
 #include "drm-client-protocol.h"
 #include "linux-dmabuf-unstable-v1-client-protocol.h"
@@ -29,7 +30,6 @@
 #include "xdg-shell-client-protocol.h"
 #include "tablet-unstable-v2-client-protocol.h"
 #include "relative-pointer-unstable-v1-client-protocol.h"
-#include "viewporter-client-protocol.h"
 
 struct wlr_wl_linux_dmabuf_feedback_v1 {
 	struct wlr_wl_backend *backend;
@@ -46,10 +46,9 @@ struct wlr_wl_linux_dmabuf_v1_table_entry {
 	uint64_t modifier;
 };
 
-struct wlr_wl_backend *get_wl_backend_from_backend(struct wlr_backend *wlr_backend) {
-	assert(wlr_backend_is_wl(wlr_backend));
-	struct wlr_wl_backend *backend = wl_container_of(wlr_backend, backend, backend);
-	return backend;
+struct wlr_wl_backend *get_wl_backend_from_backend(struct wlr_backend *backend) {
+	assert(wlr_backend_is_wl(backend));
+	return (struct wlr_wl_backend *)backend;
 }
 
 static int dispatch_events(int fd, uint32_t mask, void *data) {
@@ -257,7 +256,7 @@ static char *get_render_name(const char *name) {
 		wlr_log(WLR_ERROR, "drmGetDevices2 failed: %s", strerror(-devices_len));
 		return NULL;
 	}
-	drmDevice **devices = calloc(devices_len, sizeof(*devices));
+	drmDevice **devices = calloc(devices_len, sizeof(drmDevice *));
 	if (devices == NULL) {
 		wlr_log_errno(WLR_ERROR, "Allocation failed");
 		return NULL;
@@ -356,7 +355,7 @@ static void registry_global(void *data, struct wl_registry *registry,
 		}
 		struct wl_seat *wl_seat = wl_registry_bind(registry, name,
 			&wl_seat_interface, target_version);
-		if (!create_wl_seat(wl_seat, wl, name)) {
+		if (!create_wl_seat(wl_seat, wl)) {
 			wl_seat_destroy(wl_seat);
 		}
 	} else if (strcmp(iface, xdg_wm_base_interface.name) == 0) {
@@ -395,26 +394,12 @@ static void registry_global(void *data, struct wl_registry *registry,
 	} else if (strcmp(iface, xdg_activation_v1_interface.name) == 0) {
 		wl->activation_v1 = wl_registry_bind(registry, name,
 			&xdg_activation_v1_interface, 1);
-	} else if (strcmp(iface, wl_subcompositor_interface.name) == 0) {
-		wl->subcompositor = wl_registry_bind(registry, name,
-			&wl_subcompositor_interface, 1);
-	} else if (strcmp(iface, wp_viewporter_interface.name) == 0) {
-		wl->viewporter = wl_registry_bind(registry, name,
-			&wp_viewporter_interface, 1);
 	}
 }
 
 static void registry_global_remove(void *data, struct wl_registry *registry,
 		uint32_t name) {
-	struct wlr_wl_backend *wl = data;
-
-	struct wlr_wl_seat *seat;
-	wl_list_for_each(seat, &wl->seats, link) {
-		if (seat->global_name == name) {
-			destroy_wl_seat(seat);
-			break;
-		}
-	}
+	// TODO
 }
 
 static const struct wl_registry_listener registry_listener = {
@@ -437,10 +422,6 @@ static bool backend_start(struct wlr_backend *backend) {
 	wl_list_for_each(seat, &wl->seats, link) {
 		if (seat->wl_keyboard) {
 			init_seat_keyboard(seat);
-		}
-
-		if (seat->wl_touch) {
-			init_seat_touch(seat);
 		}
 
 		if (wl->tablet_manager) {
@@ -467,10 +448,8 @@ static void backend_destroy(struct wlr_backend *backend) {
 		wlr_output_destroy(&output->wlr_output);
 	}
 
-	// Avoid using wl_list_for_each_safe() here: destroying a buffer may
-	// have the side-effect of destroying the next one in the list
-	while (!wl_list_empty(&wl->buffers)) {
-		struct wlr_wl_buffer *buffer = wl_container_of(wl->buffers.next, buffer, link);
+	struct wlr_wl_buffer *buffer, *tmp_buffer;
+	wl_list_for_each_safe(buffer, tmp_buffer, &wl->buffers, link) {
 		destroy_wl_buffer(buffer);
 	}
 
@@ -485,22 +464,12 @@ static void backend_destroy(struct wlr_backend *backend) {
 	wlr_drm_format_set_finish(&wl->shm_formats);
 	wlr_drm_format_set_finish(&wl->linux_dmabuf_v1_formats);
 
-	struct wlr_wl_seat *seat, *tmp_seat;
-	wl_list_for_each_safe(seat, tmp_seat, &wl->seats, link) {
-		destroy_wl_seat(seat);
-	}
-
-	if (wl->activation_v1) {
-		xdg_activation_v1_destroy(wl->activation_v1);
-	}
+	destroy_wl_seats(wl);
 	if (wl->zxdg_decoration_manager_v1) {
 		zxdg_decoration_manager_v1_destroy(wl->zxdg_decoration_manager_v1);
 	}
 	if (wl->zwp_pointer_gestures_v1) {
 		zwp_pointer_gestures_v1_destroy(wl->zwp_pointer_gestures_v1);
-	}
-	if (wl->tablet_manager) {
-		zwp_tablet_manager_v2_destroy(wl->tablet_manager);
 	}
 	if (wl->presentation) {
 		wp_presentation_destroy(wl->presentation);
@@ -508,20 +477,11 @@ static void backend_destroy(struct wlr_backend *backend) {
 	if (wl->zwp_linux_dmabuf_v1) {
 		zwp_linux_dmabuf_v1_destroy(wl->zwp_linux_dmabuf_v1);
 	}
-	if (wl->legacy_drm != NULL) {
-		wl_drm_destroy(wl->legacy_drm);
-	}
 	if (wl->shm) {
 		wl_shm_destroy(wl->shm);
 	}
 	if (wl->zwp_relative_pointer_manager_v1) {
 		zwp_relative_pointer_manager_v1_destroy(wl->zwp_relative_pointer_manager_v1);
-	}
-	if (wl->subcompositor) {
-		wl_subcompositor_destroy(wl->subcompositor);
-	}
-	if (wl->viewporter) {
-		wp_viewporter_destroy(wl->viewporter);
 	}
 	free(wl->drm_render_name);
 	free(wl->activation_token);
@@ -529,9 +489,7 @@ static void backend_destroy(struct wlr_backend *backend) {
 	wl_compositor_destroy(wl->compositor);
 	wl_registry_destroy(wl->registry);
 	wl_display_flush(wl->remote_display);
-	if (wl->own_remote_display) {
-		wl_display_disconnect(wl->remote_display);
-	}
+	wl_display_disconnect(wl->remote_display);
 	free(wl);
 }
 
@@ -570,7 +528,7 @@ static void handle_display_destroy(struct wl_listener *listener, void *data) {
 }
 
 struct wlr_backend *wlr_wl_backend_create(struct wl_display *display,
-		struct wl_display *remote_display) {
+		const char *remote) {
 	wlr_log(WLR_INFO, "Creating wayland backend");
 
 	struct wlr_wl_backend *wl = calloc(1, sizeof(*wl));
@@ -587,15 +545,10 @@ struct wlr_backend *wlr_wl_backend_create(struct wl_display *display,
 	wl_list_init(&wl->buffers);
 	wl->presentation_clock = CLOCK_MONOTONIC;
 
-	if (remote_display != NULL) {
-		wl->remote_display = remote_display;
-	} else {
-		wl->remote_display = wl_display_connect(NULL);
-		if (!wl->remote_display) {
-			wlr_log_errno(WLR_ERROR, "Could not connect to remote display");
-			goto error_wl;
-		}
-		wl->own_remote_display = true;
+	wl->remote_display = wl_display_connect(remote);
+	if (!wl->remote_display) {
+		wlr_log_errno(WLR_ERROR, "Could not connect to remote display");
+		goto error_wl;
 	}
 
 	wl->registry = wl_display_get_registry(wl->remote_display);
@@ -692,9 +645,7 @@ error_registry:
 	}
 	wl_registry_destroy(wl->registry);
 error_display:
-	if (wl->own_remote_display) {
-		wl_display_disconnect(wl->remote_display);
-	}
+	wl_display_disconnect(wl->remote_display);
 error_wl:
 	wlr_backend_finish(&wl->backend);
 	free(wl);

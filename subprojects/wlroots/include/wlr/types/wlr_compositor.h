@@ -28,7 +28,6 @@ enum wlr_surface_state_field {
 	WLR_SURFACE_STATE_SCALE = 1 << 6,
 	WLR_SURFACE_STATE_FRAME_CALLBACK_LIST = 1 << 7,
 	WLR_SURFACE_STATE_VIEWPORT = 1 << 8,
-	WLR_SURFACE_STATE_OFFSET = 1 << 9,
 };
 
 struct wlr_surface_state {
@@ -73,43 +72,23 @@ struct wlr_surface_state {
 
 struct wlr_surface_role {
 	const char *name;
-	/**
-	 * If true, the role isn't represented by any object.
-	 * For example, this applies to cursor surfaces.
-	 */
-	bool no_object;
-	/**
-	 * Called when a new surface state is committed. May be NULL.
-	 *
-	 * If the role is represented by an object, this is only called if
-	 * such object exists.
-	 */
 	void (*commit)(struct wlr_surface *surface);
-	/**
-	 * Called when the surface is unmapped. May be NULL.
-	 *
-	 * If the role is represented by an object, this is only called if
-	 * such object exists.
-	 */
-	void (*unmap)(struct wlr_surface *surface);
-	/**
-	 * Called when the object representing the role is destroyed. May be NULL.
-	 */
-	void (*destroy)(struct wlr_surface *surface);
+	void (*precommit)(struct wlr_surface *surface,
+		const struct wlr_surface_state *state);
 };
 
 struct wlr_surface_output {
 	struct wlr_surface *surface;
 	struct wlr_output *output;
 
-	struct wl_list link; // wlr_surface.current_outputs
+	struct wl_list link; // wlr_surface::current_outputs
 	struct wl_listener bind;
 	struct wl_listener destroy;
 };
 
 struct wlr_surface {
 	struct wl_resource *resource;
-	struct wlr_renderer *renderer; // may be NULL
+	struct wlr_renderer *renderer;
 	/**
 	 * The surface's buffer, if any. A surface has an attached buffer when it
 	 * commits with a non-null buffer in its pending state. A surface will not
@@ -117,6 +96,10 @@ struct wlr_surface {
 	 * or something went wrong with uploading the buffer.
 	 */
 	struct wlr_client_buffer *buffer;
+	/**
+	 * The buffer position, in surface-local units.
+	 */
+	int sx, sy;
 	/**
 	 * The last commit's buffer damage, in buffer-local coordinates. This
 	 * contains both the damage accumulated by the client via
@@ -143,8 +126,6 @@ struct wlr_surface {
 	/**
 	 * The current input region, in surface-local coordinates. It is clipped to
 	 * the surface bounds.
-	 *
-	 * If the protocol states that the input region is ignored, this is empty.
 	 */
 	pixman_region32_t input_region;
 	/**
@@ -156,40 +137,12 @@ struct wlr_surface {
 
 	struct wl_list cached; // wlr_surface_state.cached_link
 
-	/**
-	 * Whether the surface is ready to be displayed.
-	 */
-	bool mapped;
-
-	/**
-	 * The lifetime-bound role of the surface. NULL if the role was never set.
-	 */
-	const struct wlr_surface_role *role;
-
-	/**
-	 * The role object representing the role. NULL if the role isn't
-	 * represented by any object or the object was destroyed.
-	 */
-	struct wl_resource *role_resource;
+	const struct wlr_surface_role *role; // the lifetime-bound role or NULL
+	void *role_data; // role-specific data
 
 	struct {
 		struct wl_signal client_commit;
-		struct wl_signal precommit; // const struct wlr_surface_state *
 		struct wl_signal commit;
-
-		/**
-		 * The `map` event signals that the surface has a non-null buffer
-		 * committed and is ready to be displayed.
-		 */
-		struct wl_signal map;
-		/**
-		 * The `unmap` event signals that the surface shouldn't be displayed
-		 * anymore. This can happen when a null buffer is committed,
-		 * the associated role object is destroyed, or when the role-specific
-		 * conditions for the surface to be mapped no longer apply.
-		 */
-		struct wl_signal unmap;
-
 		struct wl_signal new_subsurface;
 		struct wl_signal destroy;
 	} events;
@@ -202,7 +155,6 @@ struct wlr_surface {
 	// private state
 
 	struct wl_listener renderer_destroy;
-	struct wl_listener role_resource_destroy;
 
 	struct {
 		int32_t scale;
@@ -212,18 +164,13 @@ struct wlr_surface {
 	} previous;
 
 	bool opaque;
-	bool has_buffer;
-
-	int32_t preferred_buffer_scale;
-	bool preferred_buffer_transform_sent;
-	enum wl_output_transform preferred_buffer_transform;
 };
 
 struct wlr_renderer;
 
 struct wlr_compositor {
 	struct wl_global *global;
-	struct wlr_renderer *renderer; // may be NULL
+	struct wlr_renderer *renderer;
 
 	struct wl_listener display_destroy;
 
@@ -237,38 +184,12 @@ typedef void (*wlr_surface_iterator_func_t)(struct wlr_surface *surface,
 	int sx, int sy, void *data);
 
 /**
- * Set the lifetime role for this surface.
- *
- * If the surface already has a different role and/or has a role object set,
- * the function fails and sends an error to the client.
- *
- * Returns true on success, false otherwise.
+ * Set the lifetime role for this surface. Returns 0 on success or -1 if the
+ * role cannot be set.
  */
-bool wlr_surface_set_role(struct wlr_surface *surface, const struct wlr_surface_role *role,
-	struct wl_resource *error_resource, uint32_t error_code);
-
-/**
- * Set the role object for this surface. The surface must have a role and
- * no already set role object.
- *
- * When the resource is destroyed, the surface is unmapped,
- * wlr_surface_role.destroy is called and the role object is unset.
- */
-void wlr_surface_set_role_object(struct wlr_surface *surface, struct wl_resource *role_resource);
-
-/**
- * Map the surface. If the surface is already mapped, this is no-op.
- *
- * This function must only be used by surface role implementations.
- */
-void wlr_surface_map(struct wlr_surface *surface);
-
-/**
- * Unmap the surface. If the surface is already unmapped, this is no-op.
- *
- * This function must only be used by surface role implementations.
- */
-void wlr_surface_unmap(struct wlr_surface *surface);
+bool wlr_surface_set_role(struct wlr_surface *surface,
+		const struct wlr_surface_role *role, void *role_data,
+		struct wl_resource *error_resource, uint32_t error_code);
 
 /**
  * Whether or not this surface currently has an attached buffer. A surface has
@@ -307,28 +228,12 @@ bool wlr_surface_point_accepts_input(struct wlr_surface *surface,
 struct wlr_surface *wlr_surface_surface_at(struct wlr_surface *surface,
 		double sx, double sy, double *sub_x, double *sub_y);
 
-/**
- * Notify the client that the surface has entered an output.
- *
- * This is a no-op if the surface has already entered the output.
- */
 void wlr_surface_send_enter(struct wlr_surface *surface,
 		struct wlr_output *output);
 
-/**
- * Notify the client that the surface has left an output.
- *
- * This is a no-op if the surface has already left the output.
- */
 void wlr_surface_send_leave(struct wlr_surface *surface,
 		struct wlr_output *output);
 
-/**
- * Complete the queued frame callbacks for this surface.
- *
- * This will send an event to the client indicating that now is a good time to
- * draw its next frame.
- */
 void wlr_surface_send_frame_done(struct wlr_surface *surface,
 		const struct timespec *when);
 
@@ -394,32 +299,7 @@ uint32_t wlr_surface_lock_pending(struct wlr_surface *surface);
  */
 void wlr_surface_unlock_cached(struct wlr_surface *surface, uint32_t seq);
 
-/**
- * Set the preferred buffer scale for the surface.
- *
- * This sends an event to the client indicating the preferred scale to use for
- * buffers attached to this surface.
- */
-void wlr_surface_set_preferred_buffer_scale(struct wlr_surface *surface,
-	int32_t scale);
-
-/**
- * Set the preferred buffer transform for the surface.
- *
- * This sends an event to the client indicating the preferred transform to use
- * for buffers attached to this surface.
- */
-void wlr_surface_set_preferred_buffer_transform(struct wlr_surface *surface,
-	enum wl_output_transform transform);
-
-/**
- * Create the wl_compositor global, which can be used by clients to create
- * surfaces and regions.
- *
- * If a renderer is supplied, the compositor will create struct wlr_texture
- * objects from client buffers on surface commit.
- */
 struct wlr_compositor *wlr_compositor_create(struct wl_display *display,
-	uint32_t version, struct wlr_renderer *renderer);
+	struct wlr_renderer *renderer);
 
 #endif

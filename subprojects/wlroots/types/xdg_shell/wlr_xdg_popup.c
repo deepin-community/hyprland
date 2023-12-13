@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "types/wlr_xdg_shell.h"
+#include "util/signal.h"
 
 void handle_xdg_popup_ack_configure(
 		struct wlr_xdg_popup *popup,
@@ -12,7 +13,8 @@ void handle_xdg_popup_ack_configure(
 
 struct wlr_xdg_popup_configure *send_xdg_popup_configure(
 		struct wlr_xdg_popup *popup) {
-	struct wlr_xdg_popup_configure *configure = calloc(1, sizeof(*configure));
+	struct wlr_xdg_popup_configure *configure =
+		calloc(1, sizeof(*configure));
 	if (configure == NULL) {
 		wl_resource_post_no_memory(popup->resource);
 		return NULL;
@@ -105,8 +107,8 @@ static const struct wlr_pointer_grab_interface xdg_pointer_grab_impl = {
 };
 
 static void xdg_keyboard_grab_enter(struct wlr_seat_keyboard_grab *grab,
-		struct wlr_surface *surface, const uint32_t keycodes[], size_t num_keycodes,
-		const struct wlr_keyboard_modifiers *modifiers) {
+		struct wlr_surface *surface, uint32_t keycodes[], size_t num_keycodes,
+		struct wlr_keyboard_modifiers *modifiers) {
 	// keyboard focus should remain on the popup
 }
 
@@ -120,7 +122,7 @@ static void xdg_keyboard_grab_key(struct wlr_seat_keyboard_grab *grab, uint32_t 
 }
 
 static void xdg_keyboard_grab_modifiers(struct wlr_seat_keyboard_grab *grab,
-		const struct wlr_keyboard_modifiers *modifiers) {
+		struct wlr_keyboard_modifiers *modifiers) {
 	wlr_seat_keyboard_send_modifiers(grab->seat, modifiers);
 }
 
@@ -190,7 +192,7 @@ static void destroy_xdg_popup_grab(struct wlr_xdg_popup_grab *xdg_grab) {
 
 	struct wlr_xdg_popup *popup, *tmp;
 	wl_list_for_each_safe(popup, tmp, &xdg_grab->popups, grab_link) {
-		wlr_xdg_popup_destroy(popup);
+		destroy_xdg_surface(popup->base);
 	}
 
 	wl_list_remove(&xdg_grab->link);
@@ -213,7 +215,7 @@ static struct wlr_xdg_popup_grab *get_xdg_shell_popup_grab_from_seat(
 		}
 	}
 
-	xdg_grab = calloc(1, sizeof(*xdg_grab));
+	xdg_grab = calloc(1, sizeof(struct wlr_xdg_popup_grab));
 	if (!xdg_grab) {
 		return NULL;
 	}
@@ -244,12 +246,13 @@ void handle_xdg_popup_committed(struct wlr_xdg_popup *popup) {
 		return;
 	}
 
-	popup->current = popup->pending;
-
-	if (popup->base->initial_commit && !popup->sent_initial_configure) {
+	if (!popup->committed) {
 		wlr_xdg_surface_schedule_configure(popup->base);
-		popup->sent_initial_configure = true;
+		popup->committed = true;
+		return;
 	}
+
+	popup->current = popup->pending;
 }
 
 static const struct xdg_popup_interface xdg_popup_implementation;
@@ -272,11 +275,7 @@ static void xdg_popup_handle_grab(struct wl_client *client,
 
 	struct wlr_seat_client *seat_client =
 		wlr_seat_client_from_resource(seat_resource);
-	if (seat_client == NULL) {
-		wlr_xdg_popup_destroy(popup);
-		return;
-	}
-	if (popup->sent_initial_configure) {
+	if (popup->committed) {
 		wl_resource_post_error(popup->resource,
 			XDG_POPUP_ERROR_INVALID_GRAB,
 			"xdg_popup is already mapped");
@@ -326,7 +325,7 @@ static void xdg_popup_handle_reposition(
 
 	wlr_xdg_surface_schedule_configure(popup->base);
 
-	wl_signal_emit_mutable(&popup->events.reposition, NULL);
+	wlr_signal_emit_safe(&popup->events.reposition, NULL);
 }
 
 static void xdg_popup_handle_destroy(struct wl_client *client,
@@ -359,6 +358,12 @@ static void xdg_popup_handle_resource_destroy(struct wl_resource *resource) {
 	wlr_xdg_popup_destroy(popup);
 }
 
+const struct wlr_surface_role xdg_popup_surface_role = {
+	.name = "xdg_popup",
+	.commit = xdg_surface_role_commit,
+	.precommit = xdg_surface_role_precommit,
+};
+
 void create_xdg_popup(struct wlr_xdg_surface *surface,
 		struct wlr_xdg_surface *parent,
 		struct wlr_xdg_positioner *positioner, uint32_t id) {
@@ -370,18 +375,20 @@ void create_xdg_popup(struct wlr_xdg_surface *surface,
 		return;
 	}
 
-	if (!set_xdg_surface_role(surface, WLR_XDG_SURFACE_ROLE_POPUP)) {
+	if (surface->role != WLR_XDG_SURFACE_ROLE_NONE) {
+		wl_resource_post_error(surface->resource,
+			XDG_SURFACE_ERROR_ALREADY_CONSTRUCTED,
+			"xdg-surface has already been constructed");
 		return;
 	}
 
-	if (parent != NULL && parent->role == WLR_XDG_SURFACE_ROLE_NONE) {
-		wl_resource_post_error(surface->client->resource, XDG_WM_BASE_ERROR_INVALID_POPUP_PARENT,
-			"a popup parent must have a role");
+	if (!wlr_surface_set_role(surface->surface, &xdg_popup_surface_role,
+			surface, surface->resource, XDG_WM_BASE_ERROR_ROLE)) {
 		return;
 	}
 
 	assert(surface->popup == NULL);
-	surface->popup = calloc(1, sizeof(*surface->popup));
+	surface->popup = calloc(1, sizeof(struct wlr_xdg_popup));
 	if (!surface->popup) {
 		wl_resource_post_no_memory(surface->resource);
 		return;
@@ -412,15 +419,13 @@ void create_xdg_popup(struct wlr_xdg_surface *surface,
 	if (parent) {
 		surface->popup->parent = parent->surface;
 		wl_list_insert(&parent->popups, &surface->popup->link);
-		wl_signal_emit_mutable(&parent->events.new_popup, surface->popup);
+		wlr_signal_emit_safe(&parent->events.new_popup, surface->popup);
 	} else {
 		wl_list_init(&surface->popup->link);
 	}
-
-	set_xdg_surface_role_object(surface, surface->popup->resource);
 }
 
-void reset_xdg_popup(struct wlr_xdg_popup *popup) {
+void unmap_xdg_popup(struct wlr_xdg_popup *popup) {
 	if (popup->seat != NULL) {
 		struct wlr_xdg_popup_grab *grab =
 			get_xdg_shell_popup_grab_from_seat(
@@ -444,22 +449,9 @@ void reset_xdg_popup(struct wlr_xdg_popup *popup) {
 
 		popup->seat = NULL;
 	}
-
-	popup->sent_initial_configure = false;
 }
 
 void destroy_xdg_popup(struct wlr_xdg_popup *popup) {
-	wlr_surface_unmap(popup->base->surface);
-	reset_xdg_popup(popup);
-
-	// TODO: improve events
-	if (popup->base->added) {
-		wl_signal_emit_mutable(&popup->base->events.destroy, NULL);
-		popup->base->added = false;
-	}
-
-	popup->base->popup = NULL;
-
 	wl_list_remove(&popup->link);
 	wl_resource_set_user_data(popup->resource, NULL);
 	free(popup);
@@ -476,15 +468,18 @@ void wlr_xdg_popup_destroy(struct wlr_xdg_popup *popup) {
 	}
 
 	xdg_popup_send_popup_done(popup->resource);
-	destroy_xdg_popup(popup);
+	wl_resource_set_user_data(popup->resource, NULL);
+	reset_xdg_surface(popup->base);
 }
 
 void wlr_xdg_popup_get_toplevel_coords(struct wlr_xdg_popup *popup,
 		int popup_sx, int popup_sy, int *toplevel_sx, int *toplevel_sy) {
 	struct wlr_surface *parent = popup->parent;
-	struct wlr_xdg_surface *xdg_surface;
-	while ((xdg_surface = wlr_xdg_surface_try_from_wlr_surface(parent))) {
-		if (xdg_surface->role == WLR_XDG_SURFACE_ROLE_POPUP && xdg_surface->popup != NULL) {
+	while (wlr_surface_is_xdg_surface(parent)) {
+		struct wlr_xdg_surface *xdg_surface =
+			wlr_xdg_surface_from_wlr_surface(parent);
+
+		if (xdg_surface->role == WLR_XDG_SURFACE_ROLE_POPUP) {
 			popup_sx += xdg_surface->popup->current.geometry.x;
 			popup_sy += xdg_surface->popup->current.geometry.y;
 			parent = xdg_surface->popup->parent;

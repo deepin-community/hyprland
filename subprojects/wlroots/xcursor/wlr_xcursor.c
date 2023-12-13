@@ -47,13 +47,17 @@ static void xcursor_destroy(struct wlr_xcursor *cursor) {
 
 static struct wlr_xcursor *xcursor_create_from_data(
 		const struct cursor_metadata *metadata, struct wlr_xcursor_theme *theme) {
-	struct wlr_xcursor *cursor = calloc(1, sizeof(*cursor));
+	struct wlr_xcursor *cursor;
+	struct wlr_xcursor_image *image;
+	int size;
+
+	cursor = malloc(sizeof(*cursor));
 	if (!cursor) {
 		return NULL;
 	}
 
 	cursor->image_count = 1;
-	cursor->images = calloc(1, sizeof(*cursor->images));
+	cursor->images = malloc(sizeof(*cursor->images));
 	if (!cursor->images) {
 		goto err_free_cursor;
 	}
@@ -61,7 +65,7 @@ static struct wlr_xcursor *xcursor_create_from_data(
 	cursor->name = strdup(metadata->name);
 	cursor->total_delay = 0;
 
-	struct wlr_xcursor_image *image = calloc(1, sizeof(*image));
+	image = malloc(sizeof(*image));
 	if (!image) {
 		goto err_free_images;
 	}
@@ -74,8 +78,9 @@ static struct wlr_xcursor *xcursor_create_from_data(
 	image->hotspot_y = metadata->hotspot_y;
 	image->delay = 0;
 
-	int size = metadata->width * metadata->height * sizeof(uint32_t);
+	size = metadata->width * metadata->height * sizeof(uint32_t);
 	image->buffer = malloc(size);
+
 	if (!image->buffer) {
 		goto err_free_image;
 	}
@@ -97,33 +102,42 @@ err_free_cursor:
 }
 
 static void load_default_theme(struct wlr_xcursor_theme *theme) {
+	uint32_t i;
+
 	free(theme->name);
 	theme->name = strdup("default");
 
 	theme->cursor_count = sizeof(cursor_metadata) / sizeof(cursor_metadata[0]);
 	theme->cursors = malloc(theme->cursor_count * sizeof(*theme->cursors));
+
 	if (theme->cursors == NULL) {
 		theme->cursor_count = 0;
 		return;
 	}
 
-	for (uint32_t i = 0; i < theme->cursor_count; ++i) {
+	for (i = 0; i < theme->cursor_count; ++i) {
 		theme->cursors[i] =
 			xcursor_create_from_data(&cursor_metadata[i], theme);
+
 		if (theme->cursors[i] == NULL) {
 			break;
 		}
 	}
+	theme->cursor_count = i;
 }
 
 static struct wlr_xcursor *xcursor_create_from_xcursor_images(
-		struct xcursor_images *images, struct wlr_xcursor_theme *theme) {
-	struct wlr_xcursor *cursor = calloc(1, sizeof(*cursor));
+		XcursorImages *images, struct wlr_xcursor_theme *theme) {
+	struct wlr_xcursor *cursor;
+	struct wlr_xcursor_image *image;
+	int i, size;
+
+	cursor = malloc(sizeof(*cursor));
 	if (!cursor) {
 		return NULL;
 	}
 
-	cursor->images = calloc(images->nimage, sizeof(cursor->images[0]));
+	cursor->images = malloc(images->nimage * sizeof(cursor->images[0]));
 	if (!cursor->images) {
 		free(cursor);
 		return NULL;
@@ -132,8 +146,8 @@ static struct wlr_xcursor *xcursor_create_from_xcursor_images(
 	cursor->name = strdup(images->name);
 	cursor->total_delay = 0;
 
-	for (int i = 0; i < images->nimage; i++) {
-		struct wlr_xcursor_image *image = calloc(1, sizeof(*image));
+	for (i = 0; i < images->nimage; i++) {
+		image = malloc(sizeof(*image));
 		if (image == NULL) {
 			break;
 		}
@@ -146,7 +160,7 @@ static struct wlr_xcursor *xcursor_create_from_xcursor_images(
 		image->hotspot_y = images->images[i]->yhot;
 		image->delay = images->images[i]->delay;
 
-		size_t size = image->width * image->height * 4;
+		size = image->width * image->height * 4;
 		image->buffer = malloc(size);
 		if (!image->buffer) {
 			free(image);
@@ -157,8 +171,8 @@ static struct wlr_xcursor *xcursor_create_from_xcursor_images(
 		memcpy(image->buffer, images->images[i]->pixels, size);
 		cursor->total_delay += image->delay;
 		cursor->images[i] = image;
-		cursor->image_count++;
 	}
+	cursor->image_count = i;
 
 	if (cursor->image_count == 0) {
 		free(cursor->name);
@@ -170,19 +184,24 @@ static struct wlr_xcursor *xcursor_create_from_xcursor_images(
 	return cursor;
 }
 
-static void load_callback(struct xcursor_images *images, void *data) {
+static void load_callback(XcursorImages *images, void *data) {
 	struct wlr_xcursor_theme *theme = data;
+	struct wlr_xcursor *cursor;
 
 	if (wlr_xcursor_theme_get_cursor(theme, images->name)) {
-		xcursor_images_destroy(images);
+		XcursorImagesDestroy(images);
 		return;
 	}
 
-	struct wlr_xcursor *cursor = xcursor_create_from_xcursor_images(images, theme);
+	cursor = xcursor_create_from_xcursor_images(images, theme);
+
 	if (cursor) {
+		struct wlr_xcursor **cursors;
 		theme->cursor_count++;
-		struct wlr_xcursor **cursors = realloc(theme->cursors,
-			theme->cursor_count * sizeof(theme->cursors[0]));
+		cursors =
+			realloc(theme->cursors,
+				theme->cursor_count * sizeof(theme->cursors[0]));
+
 		if (cursors == NULL) {
 			theme->cursor_count--;
 			free(cursor);
@@ -192,11 +211,13 @@ static void load_callback(struct xcursor_images *images, void *data) {
 		}
 	}
 
-	xcursor_images_destroy(images);
+	XcursorImagesDestroy(images);
 }
 
 struct wlr_xcursor_theme *wlr_xcursor_theme_load(const char *name, int size) {
-	struct wlr_xcursor_theme *theme = calloc(1, sizeof(*theme));
+	struct wlr_xcursor_theme *theme;
+
+	theme = malloc(sizeof(*theme));
 	if (!theme) {
 		return NULL;
 	}
@@ -230,7 +251,9 @@ out_error_name:
 }
 
 void wlr_xcursor_theme_destroy(struct wlr_xcursor_theme *theme) {
-	for (unsigned int i = 0; i < theme->cursor_count; i++) {
+	unsigned int i;
+
+	for (i = 0; i < theme->cursor_count; i++) {
 		xcursor_destroy(theme->cursors[i]);
 	}
 
@@ -241,7 +264,9 @@ void wlr_xcursor_theme_destroy(struct wlr_xcursor_theme *theme) {
 
 struct wlr_xcursor *wlr_xcursor_theme_get_cursor(struct wlr_xcursor_theme *theme,
 		const char *name) {
-	for (unsigned int i = 0; i < theme->cursor_count; i++) {
+	unsigned int i;
+
+	for (i = 0; i < theme->cursor_count; i++) {
 		if (strcmp(name, theme->cursors[i]->name) == 0) {
 			return theme->cursors[i];
 		}
@@ -252,6 +277,9 @@ struct wlr_xcursor *wlr_xcursor_theme_get_cursor(struct wlr_xcursor_theme *theme
 
 static int xcursor_frame_and_duration(struct wlr_xcursor *cursor,
 		uint32_t time, uint32_t *duration) {
+	uint32_t t;
+	int i;
+
 	if (cursor->image_count == 1) {
 		if (duration) {
 			*duration = 0;
@@ -259,8 +287,8 @@ static int xcursor_frame_and_duration(struct wlr_xcursor *cursor,
 		return 0;
 	}
 
-	int i = 0;
-	uint32_t t = time % cursor->total_delay;
+	i = 0;
+	t = time % cursor->total_delay;
 
 	/* If there is a 0 delay in the image set then this
 	 * loop breaks on it and we display that cursor until

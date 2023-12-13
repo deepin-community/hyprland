@@ -15,6 +15,7 @@
 #include "render/gles2.h"
 #include "render/pixel_format.h"
 #include "types/wlr_buffer.h"
+#include "util/signal.h"
 
 static const struct wlr_texture_impl texture_impl;
 
@@ -25,28 +26,32 @@ bool wlr_texture_is_gles2(struct wlr_texture *wlr_texture) {
 struct wlr_gles2_texture *gles2_get_texture(
 		struct wlr_texture *wlr_texture) {
 	assert(wlr_texture_is_gles2(wlr_texture));
-	struct wlr_gles2_texture *texture = wl_container_of(wlr_texture, texture, wlr_texture);
-	return texture;
+	return (struct wlr_gles2_texture *)wlr_texture;
 }
 
-static bool gles2_texture_update_from_buffer(struct wlr_texture *wlr_texture,
-		struct wlr_buffer *buffer, const pixman_region32_t *damage) {
+static bool check_stride(const struct wlr_pixel_format_info *fmt,
+		uint32_t stride, uint32_t width) {
+	if (stride % (fmt->bpp / 8) != 0) {
+		wlr_log(WLR_ERROR, "Invalid stride %d (incompatible with %d "
+			"bytes-per-pixel)", stride, fmt->bpp / 8);
+		return false;
+	}
+	if (stride < width * (fmt->bpp / 8)) {
+		wlr_log(WLR_ERROR, "Invalid stride %d (too small for %d "
+			"bytes-per-pixel and width %d)", stride, fmt->bpp / 8, width);
+		return false;
+	}
+	return true;
+}
+
+static bool gles2_texture_write_pixels(struct wlr_texture *wlr_texture,
+		uint32_t stride, uint32_t width, uint32_t height,
+		uint32_t src_x, uint32_t src_y, uint32_t dst_x, uint32_t dst_y,
+		const void *data) {
 	struct wlr_gles2_texture *texture = gles2_get_texture(wlr_texture);
 
 	if (texture->target != GL_TEXTURE_2D || texture->image != EGL_NO_IMAGE_KHR) {
-		return false;
-	}
-
-	void *data;
-	uint32_t format;
-	size_t stride;
-	if (!wlr_buffer_begin_data_ptr_access(buffer,
-			WLR_BUFFER_DATA_PTR_ACCESS_READ, &data, &format, &stride)) {
-		return false;
-	}
-
-	if (format != texture->drm_format) {
-		wlr_buffer_end_data_ptr_access(buffer);
+		wlr_log(WLR_ERROR, "Cannot write pixels to immutable texture");
 		return false;
 	}
 
@@ -57,14 +62,8 @@ static bool gles2_texture_update_from_buffer(struct wlr_texture *wlr_texture,
 	const struct wlr_pixel_format_info *drm_fmt =
 		drm_get_pixel_format_info(texture->drm_format);
 	assert(drm_fmt);
-	if (pixel_format_info_pixels_per_block(drm_fmt) != 1) {
-		wlr_buffer_end_data_ptr_access(buffer);
-		wlr_log(WLR_ERROR, "Cannot update texture: block formats are not supported");
-		return false;
-	}
 
-	if (!pixel_format_info_check_stride(drm_fmt, stride, buffer->width)) {
-		wlr_buffer_end_data_ptr_access(buffer);
+	if (!check_stride(drm_fmt, stride, width)) {
 		return false;
 	}
 
@@ -76,21 +75,12 @@ static bool gles2_texture_update_from_buffer(struct wlr_texture *wlr_texture,
 
 	glBindTexture(GL_TEXTURE_2D, texture->tex);
 
-	int rects_len = 0;
-	const pixman_box32_t *rects = pixman_region32_rectangles(damage, &rects_len);
+	glPixelStorei(GL_UNPACK_ROW_LENGTH_EXT, stride / (drm_fmt->bpp / 8));
+	glPixelStorei(GL_UNPACK_SKIP_PIXELS_EXT, src_x);
+	glPixelStorei(GL_UNPACK_SKIP_ROWS_EXT, src_y);
 
-	for (int i = 0; i < rects_len; i++) {
-		pixman_box32_t rect = rects[i];
-
-		glPixelStorei(GL_UNPACK_ROW_LENGTH_EXT, stride / drm_fmt->bytes_per_block);
-		glPixelStorei(GL_UNPACK_SKIP_PIXELS_EXT, rect.x1);
-		glPixelStorei(GL_UNPACK_SKIP_ROWS_EXT, rect.y1);
-
-		int width = rect.x2 - rect.x1;
-		int height = rect.y2 - rect.y1;
-		glTexSubImage2D(GL_TEXTURE_2D, 0, rect.x1, rect.y1, width, height,
-			fmt->gl_format, fmt->gl_type, data);
-	}
+	glTexSubImage2D(GL_TEXTURE_2D, 0, dst_x, dst_y, width, height,
+		fmt->gl_format, fmt->gl_type, data);
 
 	glPixelStorei(GL_UNPACK_ROW_LENGTH_EXT, 0);
 	glPixelStorei(GL_UNPACK_SKIP_PIXELS_EXT, 0);
@@ -101,8 +91,6 @@ static bool gles2_texture_update_from_buffer(struct wlr_texture *wlr_texture,
 	pop_gles2_debug(texture->renderer);
 
 	wlr_egl_restore_context(&prev_ctx);
-
-	wlr_buffer_end_data_ptr_access(buffer);
 
 	return true;
 }
@@ -168,19 +156,19 @@ static void gles2_texture_unref(struct wlr_texture *wlr_texture) {
 }
 
 static const struct wlr_texture_impl texture_impl = {
-	.update_from_buffer = gles2_texture_update_from_buffer,
+	.write_pixels = gles2_texture_write_pixels,
 	.destroy = gles2_texture_unref,
 };
 
 static struct wlr_gles2_texture *gles2_texture_create(
 		struct wlr_gles2_renderer *renderer, uint32_t width, uint32_t height) {
-	struct wlr_gles2_texture *texture = calloc(1, sizeof(*texture));
+	struct wlr_gles2_texture *texture =
+		calloc(1, sizeof(struct wlr_gles2_texture));
 	if (texture == NULL) {
 		wlr_log_errno(WLR_ERROR, "Allocation failed");
 		return NULL;
 	}
-	wlr_texture_init(&texture->wlr_texture, &renderer->wlr_renderer,
-		&texture_impl, width, height);
+	wlr_texture_init(&texture->wlr_texture, &texture_impl, width, height);
 	texture->renderer = renderer;
 	wl_list_insert(&renderer->textures, &texture->link);
 	return texture;
@@ -202,12 +190,8 @@ static struct wlr_texture *gles2_texture_from_pixels(
 	const struct wlr_pixel_format_info *drm_fmt =
 		drm_get_pixel_format_info(drm_format);
 	assert(drm_fmt);
-	if (pixel_format_info_pixels_per_block(drm_fmt) != 1) {
-		wlr_log(WLR_ERROR, "Cannot upload texture: block formats are not supported");
-		return NULL;
-	}
 
-	if (!pixel_format_info_check_stride(drm_fmt, stride, width)) {
+	if (!check_stride(drm_fmt, stride, width)) {
 		return NULL;
 	}
 
@@ -236,7 +220,7 @@ static struct wlr_texture *gles2_texture_from_pixels(
 
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-	glPixelStorei(GL_UNPACK_ROW_LENGTH_EXT, stride / drm_fmt->bytes_per_block);
+	glPixelStorei(GL_UNPACK_ROW_LENGTH_EXT, stride / (drm_fmt->bpp / 8));
 	glTexImage2D(GL_TEXTURE_2D, 0, internal_format, width, height, 0,
 		fmt->gl_format, fmt->gl_type, data);
 	glPixelStorei(GL_UNPACK_ROW_LENGTH_EXT, 0);
@@ -373,9 +357,8 @@ struct wlr_texture *gles2_texture_from_buffer(struct wlr_renderer *wlr_renderer,
 void wlr_gles2_texture_get_attribs(struct wlr_texture *wlr_texture,
 		struct wlr_gles2_texture_attribs *attribs) {
 	struct wlr_gles2_texture *texture = gles2_get_texture(wlr_texture);
-	*attribs = (struct wlr_gles2_texture_attribs){
-		.target = texture->target,
-		.tex = texture->tex,
-		.has_alpha = texture->has_alpha,
-	};
+	memset(attribs, 0, sizeof(*attribs));
+	attribs->target = texture->target;
+	attribs->tex = texture->tex;
+	attribs->has_alpha = texture->has_alpha;
 }

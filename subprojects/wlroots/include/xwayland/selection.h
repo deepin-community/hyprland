@@ -1,9 +1,7 @@
 #ifndef XWAYLAND_SELECTION_H
 #define XWAYLAND_SELECTION_H
 
-#include <stdbool.h>
 #include <xcb/xfixes.h>
-#include <wayland-util.h>
 
 #define INCR_CHUNK_SIZE (64 * 1024)
 
@@ -12,9 +10,6 @@
 struct wlr_primary_selection_source;
 
 struct wlr_xwm_selection;
-
-struct wlr_drag;
-struct wlr_data_source;
 
 struct wlr_xwm_selection_transfer {
 	struct wlr_xwm_selection *selection;

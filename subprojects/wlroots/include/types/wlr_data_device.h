@@ -2,7 +2,6 @@
 #define TYPES_WLR_DATA_DEVICE_H
 
 #include <wayland-server-core.h>
-#include <wlr/types/wlr_data_device.h>
 
 #define DATA_DEVICE_ALL_ACTIONS (WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY | \
 	WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE | \

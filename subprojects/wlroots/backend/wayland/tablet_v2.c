@@ -9,6 +9,7 @@
 #include <wlr/util/log.h>
 
 #include "backend/wayland.h"
+#include "util/signal.h"
 #include "util/time.h"
 
 #include "tablet-unstable-v2-client-protocol.h"
@@ -39,7 +40,7 @@ struct tablet_tool {
 };
 
 struct tablet_pad_ring {
-	struct wl_list link; // tablet_pad_group.rings
+	struct wl_list link; // tablet_pad_group::rings
 	/* static */
 	struct zwp_tablet_pad_ring_v2 *ring;
 	struct tablet_pad_group *group;
@@ -52,7 +53,7 @@ struct tablet_pad_ring {
 };
 
 struct tablet_pad_strip {
-	struct wl_list link; // tablet_pad_group.strips
+	struct wl_list link; // tablet_pad_group::strips
 	struct zwp_tablet_pad_strip_v2 *strip;
 	struct tablet_pad_group *group;
 	size_t index;
@@ -69,8 +70,8 @@ struct tablet_pad_group {
 
 	struct wlr_tablet_pad_group group;
 
-	struct wl_list rings; // tablet_pad_ring.link
-	struct wl_list strips; // tablet_pad_strips.link
+	struct wl_list rings; // tablet_pad_ring::link
+	struct wl_list strips; // tablet_pad_strips::link
 };
 
 static void handle_tablet_pad_ring_source(void *data,
@@ -107,11 +108,11 @@ static void handle_tablet_pad_ring_frame(void *data,
 	};
 
 	if (ring->angle >= 0) {
-		wl_signal_emit_mutable(&ring->group->pad->events.ring, &evt);
+		wlr_signal_emit_safe(&ring->group->pad->events.ring, &evt);
 	}
 	if (ring->stopped) {
 		evt.position = -1;
-		wl_signal_emit_mutable(&ring->group->pad->events.ring, &evt);
+		wlr_signal_emit_safe(&ring->group->pad->events.ring, &evt);
 	}
 
 	ring->angle = -1;
@@ -160,11 +161,11 @@ static void handle_tablet_pad_strip_frame(void *data,
 	};
 
 	if (strip->position >= 0) {
-		wl_signal_emit_mutable(&strip->group->pad->events.strip, &evt);
+		wlr_signal_emit_safe(&strip->group->pad->events.strip, &evt);
 	}
 	if (strip->stopped) {
 		evt.position = -1;
-		wl_signal_emit_mutable(&strip->group->pad->events.strip, &evt);
+		wlr_signal_emit_safe(&strip->group->pad->events.strip, &evt);
 	}
 
 	strip->position = -1;
@@ -206,7 +207,8 @@ static void handle_tablet_pad_group_ring(void *data,
 		struct zwp_tablet_pad_group_v2 *pad_group,
 		struct zwp_tablet_pad_ring_v2 *ring) {
 	struct tablet_pad_group *group = data;
-	struct tablet_pad_ring *tablet_ring = calloc(1, sizeof(*tablet_ring));
+	struct tablet_pad_ring *tablet_ring =
+		calloc(1, sizeof(struct tablet_pad_ring));
 	if (!tablet_ring) {
 		zwp_tablet_pad_ring_v2_destroy(ring);
 		return;
@@ -226,7 +228,8 @@ static void handle_tablet_pad_group_strip(void *data,
 		struct zwp_tablet_pad_group_v2 *pad_group,
 		struct zwp_tablet_pad_strip_v2 *strip) {
 	struct tablet_pad_group *group = data;
-	struct tablet_pad_strip *tablet_strip = calloc(1, sizeof(*tablet_strip));
+	struct tablet_pad_strip *tablet_strip =
+		calloc(1, sizeof(struct tablet_pad_strip));
 	if (!tablet_strip) {
 		zwp_tablet_pad_strip_v2_destroy(strip);
 		return;
@@ -255,7 +258,7 @@ static void handle_tablet_pad_group_mode_switch(void *data,
 }
 
 static void destroy_tablet_pad_group(struct tablet_pad_group *group) {
-	/* No need to remove the link on strips rings as long as we do *not*
+	/* No need to remove the ::link on strips rings as long as we do *not*
 	 * wl_list_remove on the wl_groups ring/strip attributes here */
 	struct tablet_pad_ring *ring, *tmp_ring;
 	wl_list_for_each_safe(ring, tmp_ring, &group->rings, link) {
@@ -294,7 +297,8 @@ static void handle_tablet_pad_group(void *data,
 	struct wlr_wl_seat *seat = data;
 	struct wlr_tablet_pad *pad = &seat->wlr_tablet_pad;
 
-	struct tablet_pad_group *group = calloc(1, sizeof(*group));
+	struct tablet_pad_group *group =
+		calloc(1, sizeof(struct tablet_pad_group));
 	if (!group) {
 		wlr_log_errno(WLR_ERROR, "failed to allocate tablet_pad_group");
 		zwp_tablet_pad_group_v2_destroy(pad_group);
@@ -341,13 +345,13 @@ static void handle_tablet_pad_button(void *data,
 		.group = 0,
 	};
 
-	wl_signal_emit_mutable(&seat->wlr_tablet_pad.events.button, &evt);
+	wlr_signal_emit_safe(&seat->wlr_tablet_pad.events.button, &evt);
 }
 
 static void handle_tablet_pad_done(void *data,
 		struct zwp_tablet_pad_v2 *zwp_tablet_pad_v2) {
 	struct wlr_wl_seat *seat = data;
-	wl_signal_emit_mutable(&seat->backend->backend.events.new_input,
+	wlr_signal_emit_safe(&seat->backend->backend.events.new_input,
 		&seat->wlr_tablet_pad.base);
 }
 
@@ -358,7 +362,7 @@ static void handle_tablet_pad_enter(void *data,
 	struct wlr_wl_seat *seat = data;
 	assert(seat->zwp_tablet_v2 == tablet_p);
 
-	wl_signal_emit_mutable(&seat->wlr_tablet_pad.events.attach_tablet,
+	wlr_signal_emit_safe(&seat->wlr_tablet_pad.events.attach_tablet,
 		&seat->wlr_tablet_tool);
 }
 
@@ -501,13 +505,8 @@ static void handle_tablet_tool_proximity_in(void *data,
 	struct tablet_tool *tool = data;
 	assert(tablet_id == tool->seat->zwp_tablet_v2);
 
-	struct wlr_wl_output *output = get_wl_output_from_surface(tool->seat->backend, surface);
-	if (output == NULL) {
-		return;
-	}
-
 	tool->is_in = true;
-	tool->output = output;
+	tool->output = wl_surface_get_user_data(surface);
 }
 
 static void handle_tablet_tool_proximity_out(void *data,
@@ -592,7 +591,7 @@ static void handle_tablet_tool_button(void *data,
 			WLR_BUTTON_RELEASED : WLR_BUTTON_PRESSED,
 	};
 
-	wl_signal_emit_mutable(&tablet->events.button, &evt);
+	wlr_signal_emit_safe(&tablet->events.button, &evt);
 }
 
 static void clear_tablet_tool_values(struct tablet_tool *tool) {
@@ -630,7 +629,7 @@ static void handle_tablet_tool_frame(void *data,
 			.state = WLR_TABLET_TOOL_PROXIMITY_IN,
 		};
 
-		wl_signal_emit_mutable(&tablet->events.proximity, &evt);
+		wlr_signal_emit_safe(&tablet->events.proximity, &evt);
 	}
 
 	{
@@ -687,7 +686,7 @@ static void handle_tablet_tool_frame(void *data,
 		}
 
 		if (evt.updated_axes) {
-			wl_signal_emit_mutable(&tablet->events.axis, &evt);
+			wlr_signal_emit_safe(&tablet->events.axis, &evt);
 		}
 	}
 
@@ -706,7 +705,7 @@ static void handle_tablet_tool_frame(void *data,
 			.state = WLR_TABLET_TOOL_TIP_DOWN,
 		};
 
-		wl_signal_emit_mutable(&tablet->events.tip, &evt);
+		wlr_signal_emit_safe(&tablet->events.tip, &evt);
 	}
 
 	if (tool->is_up) {
@@ -719,7 +718,7 @@ static void handle_tablet_tool_frame(void *data,
 			.state = WLR_TABLET_TOOL_TIP_UP,
 		};
 
-		wl_signal_emit_mutable(&tablet->events.tip, &evt);
+		wlr_signal_emit_safe(&tablet->events.tip, &evt);
 	}
 
 	if (tool->is_out) {
@@ -732,7 +731,7 @@ static void handle_tablet_tool_frame(void *data,
 			.state = WLR_TABLET_TOOL_PROXIMITY_OUT,
 		};
 
-		wl_signal_emit_mutable(&tablet->events.proximity, &evt);
+		wlr_signal_emit_safe(&tablet->events.proximity, &evt);
 	}
 
 clear_values:
@@ -785,7 +784,7 @@ static void handle_tool_added(void *data,
 
 	wl_signal_init(&seat->wlr_tablet_tool.events.destroy);
 
-	struct tablet_tool *tool = calloc(1, sizeof(*tool));
+	struct tablet_tool *tool = calloc(1, sizeof(struct tablet_tool));
 	if (tool == NULL) {
 		wlr_log_errno(WLR_ERROR, "failed to allocate tablet_tool");
 		zwp_tablet_tool_v2_destroy(zwp_tablet_tool_v2);
@@ -830,7 +829,7 @@ static void handle_tablet_path(void *data, struct zwp_tablet_v2 *zwp_tablet_v2,
 static void handle_tablet_done(void *data, struct zwp_tablet_v2 *zwp_tablet_v2) {
 	struct wlr_wl_seat *seat = data;
 
-	wl_signal_emit_mutable(&seat->backend->backend.events.new_input,
+	wlr_signal_emit_safe(&seat->backend->backend.events.new_input,
 		&seat->wlr_tablet.base);
 }
 

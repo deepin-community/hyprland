@@ -10,8 +10,8 @@
 #define WLR_BACKEND_H
 
 #include <wayland-server-core.h>
+#include <wlr/backend/session.h>
 
-struct wlr_session;
 struct wlr_backend_impl;
 
 /**
@@ -34,12 +34,8 @@ struct wlr_backend {
  * Automatically initializes the most suitable backend given the environment.
  * Will always return a multi-backend. The backend is created but not started.
  * Returns NULL on failure.
- *
- * If session_ptr is not NULL, it's populated with the session which has been
- * created with the backend, if any.
  */
-struct wlr_backend *wlr_backend_autocreate(struct wl_display *display,
-	struct wlr_session **session_ptr);
+struct wlr_backend *wlr_backend_autocreate(struct wl_display *display);
 /**
  * Start the backend. This may signal new_input or new_output immediately, but
  * may also wait until the display's event loop begins. Returns false on
@@ -51,6 +47,11 @@ bool wlr_backend_start(struct wlr_backend *backend);
  * automatically when the struct wl_display is destroyed.
  */
 void wlr_backend_destroy(struct wlr_backend *backend);
+/**
+ * Obtains the struct wlr_session reference from this backend if there is any.
+ * Might return NULL for backends that don't use a session.
+ */
+struct wlr_session *wlr_backend_get_session(struct wlr_backend *backend);
 /**
  * Returns the clock used by the backend for presentation feedback.
  */

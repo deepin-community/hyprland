@@ -1,6 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
 #include <assert.h>
-#include <drm_fourcc.h>
 #include <fcntl.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -10,7 +9,6 @@
 #include <wlr/render/wlr_texture.h>
 #include <wlr/render/vulkan.h>
 #include <wlr/util/log.h>
-#include <xf86drm.h>
 #include "render/pixel_format.h"
 #include "render/vulkan.h"
 
@@ -22,8 +20,7 @@ bool wlr_texture_is_vk(struct wlr_texture *wlr_texture) {
 
 struct wlr_vk_texture *vulkan_get_texture(struct wlr_texture *wlr_texture) {
 	assert(wlr_texture_is_vk(wlr_texture));
-	struct wlr_vk_texture *texture = wl_container_of(wlr_texture, texture, wlr_texture);
-	return texture;
+	return (struct wlr_vk_texture *)wlr_texture;
 }
 
 static VkImageAspectFlagBits mem_plane_aspect(unsigned i) {
@@ -38,46 +35,36 @@ static VkImageAspectFlagBits mem_plane_aspect(unsigned i) {
 
 // Will transition the texture to shaderReadOnlyOptimal layout for reading
 // from fragment shader later on
-static bool write_pixels(struct wlr_vk_texture *texture,
-		uint32_t stride, const pixman_region32_t *region, const void *vdata,
+static bool write_pixels(struct wlr_texture *wlr_texture,
+		uint32_t stride, uint32_t width, uint32_t height, uint32_t src_x,
+		uint32_t src_y, uint32_t dst_x, uint32_t dst_y, const void *vdata,
 		VkImageLayout old_layout, VkPipelineStageFlags src_stage,
 		VkAccessFlags src_access) {
 	VkResult res;
+	struct wlr_vk_texture *texture = vulkan_get_texture(wlr_texture);
 	struct wlr_vk_renderer *renderer = texture->renderer;
 	VkDevice dev = texture->renderer->dev->dev;
 
-	const struct wlr_pixel_format_info *format_info = drm_get_pixel_format_info(texture->format->drm);
-	assert(format_info);
+	// make sure assumptions are met
+	assert(src_x + width <= texture->wlr_texture.width);
+	assert(src_y + height <= texture->wlr_texture.height);
+	assert(dst_x + width <= texture->wlr_texture.width);
+	assert(dst_y + height <= texture->wlr_texture.height);
 
-	uint32_t bsize = 0;
+	const struct wlr_pixel_format_info *format_info = drm_get_pixel_format_info(
+			texture->format->drm_format);
+	assert(format_info);
 
 	// deferred upload by transfer; using staging buffer
 	// calculate maximum side needed
-	int rects_len = 0;
-	const pixman_box32_t *rects = pixman_region32_rectangles(region, &rects_len);
-	for (int i = 0; i < rects_len; i++) {
-		pixman_box32_t rect = rects[i];
-		uint32_t width = rect.x2 - rect.x1;
-		uint32_t height = rect.y2 - rect.y1;
-
-		// make sure assumptions are met
-		assert((uint32_t)rect.x2 <= texture->wlr_texture.width);
-		assert((uint32_t)rect.y2 <= texture->wlr_texture.height);
-
-		bsize += height * pixel_format_info_min_stride(format_info, width);
-	}
-
-	VkBufferImageCopy *copies = calloc((size_t)rects_len, sizeof(*copies));
-	if (!copies) {
-		wlr_log(WLR_ERROR, "Failed to allocate image copy parameters");
-		return false;
-	}
+	uint32_t bsize = 0;
+	unsigned bytespb = format_info->bpp / 8;
+	bsize += height * bytespb * width;
 
 	// get staging buffer
-	struct wlr_vk_buffer_span span = vulkan_get_stage_span(renderer, bsize, format_info->bytes_per_block);
+	struct wlr_vk_buffer_span span = vulkan_get_stage_span(renderer, bsize);
 	if (!span.buffer || span.alloc.size != bsize) {
 		wlr_log(WLR_ERROR, "Failed to retrieve staging buffer");
-		free(copies);
 		return false;
 	}
 
@@ -86,149 +73,103 @@ static bool write_pixels(struct wlr_vk_texture *texture,
 		bsize, 0, &vmap);
 	if (res != VK_SUCCESS) {
 		wlr_vk_error("vkMapMemory", res);
-		free(copies);
 		return false;
 	}
 	char *map = (char *)vmap;
 
-	// upload data
-
-	uint32_t buf_off = span.alloc.start + (map - (char *)vmap);
-	for (int i = 0; i < rects_len; i++) {
-		pixman_box32_t rect = rects[i];
-		uint32_t width = rect.x2 - rect.x1;
-		uint32_t height = rect.y2 - rect.y1;
-		uint32_t src_x = rect.x1;
-		uint32_t src_y = rect.y1;
-		uint32_t packed_stride = (uint32_t)pixel_format_info_min_stride(format_info, width);
-
-		// write data into staging buffer span
-		const char *pdata = vdata; // data iterator
-		pdata += stride * src_y;
-		pdata += format_info->bytes_per_block * src_x;
-		if (src_x == 0 && width == texture->wlr_texture.width &&
-				stride == packed_stride) {
-			memcpy(map, pdata, packed_stride * height);
-			map += packed_stride * height;
-		} else {
-			for (unsigned i = 0u; i < height; ++i) {
-				memcpy(map, pdata, packed_stride);
-				pdata += stride;
-				map += packed_stride;
-			}
-		}
-
-		copies[i] = (VkBufferImageCopy) {
-			.imageExtent.width = width,
-			.imageExtent.height = height,
-			.imageExtent.depth = 1,
-			.imageOffset.x = src_x,
-			.imageOffset.y = src_y,
-			.imageOffset.z = 0,
-			.bufferOffset = buf_off,
-			.bufferRowLength = width,
-			.bufferImageHeight = height,
-			.imageSubresource.mipLevel = 0,
-			.imageSubresource.baseArrayLayer = 0,
-			.imageSubresource.layerCount = 1,
-			.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-		};
-
-
-		buf_off += height * packed_stride;
-	}
-
-	assert((uint32_t)(map - (char *)vmap) == bsize);
-	vkUnmapMemory(dev, span.buffer->memory);
-
 	// record staging cb
 	// will be executed before next frame
 	VkCommandBuffer cb = vulkan_record_stage_cb(renderer);
-	if (cb == VK_NULL_HANDLE) {
-		free(copies);
-		return false;
-	}
-
 	vulkan_change_layout(cb, texture->image,
 		old_layout, src_stage, src_access,
 		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_TRANSFER_BIT,
 		VK_ACCESS_TRANSFER_WRITE_BIT);
 
+	// upload data
+	const char *pdata = vdata; // data iterator
+
+	uint32_t packed_stride = bytespb * width;
+	uint32_t buf_off = span.alloc.start + (map - (char *)vmap);
+
+	// write data into staging buffer span
+	pdata += stride * src_y;
+	pdata += bytespb * src_x;
+	if (src_x == 0 && width == texture->wlr_texture.width &&
+			stride == packed_stride) {
+		memcpy(map, pdata, packed_stride * height);
+		map += packed_stride * height;
+	} else {
+		for (unsigned i = 0u; i < height; ++i) {
+			memcpy(map, pdata, packed_stride);
+			pdata += stride;
+			map += packed_stride;
+		}
+	}
+
+	VkBufferImageCopy copy;
+	copy.imageExtent.width = width;
+	copy.imageExtent.height = height;
+	copy.imageExtent.depth = 1;
+	copy.imageOffset.x = dst_x;
+	copy.imageOffset.y = dst_y;
+	copy.imageOffset.z = 0;
+	copy.bufferOffset = buf_off;
+	copy.bufferRowLength = width;
+	copy.bufferImageHeight = height;
+	copy.imageSubresource.mipLevel = 0;
+	copy.imageSubresource.baseArrayLayer = 0;
+	copy.imageSubresource.layerCount = 1;
+	copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+
+	assert((uint32_t)(map - (char *)vmap) == bsize);
+	vkUnmapMemory(dev, span.buffer->memory);
+
 	vkCmdCopyBufferToImage(cb, span.buffer->buffer, texture->image,
-		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, (uint32_t)rects_len, copies);
+		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
 	vulkan_change_layout(cb, texture->image,
 		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_TRANSFER_BIT,
 		VK_ACCESS_TRANSFER_WRITE_BIT,
 		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 		VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT, VK_ACCESS_SHADER_READ_BIT);
-	texture->last_used_cb = renderer->stage.cb;
-
-	free(copies);
+	texture->last_used = renderer->frame;
 
 	return true;
 }
 
-static bool vulkan_texture_update_from_buffer(struct wlr_texture *wlr_texture,
-		struct wlr_buffer *buffer, const pixman_region32_t *damage) {
-	struct wlr_vk_texture *texture = vulkan_get_texture(wlr_texture);
-
-	void *data;
-	uint32_t format;
-	size_t stride;
-	if (!wlr_buffer_begin_data_ptr_access(buffer,
-			WLR_BUFFER_DATA_PTR_ACCESS_READ, &data, &format, &stride)) {
-		return false;
-	}
-
-	bool ok = true;
-
-	if (format != texture->format->drm) {
-		ok = false;
-		goto out;
-	}
-
-	ok = write_pixels(texture, stride, damage, data, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+static bool vulkan_texture_write_pixels(struct wlr_texture *wlr_texture,
+		uint32_t stride, uint32_t width, uint32_t height, uint32_t src_x,
+		uint32_t src_y, uint32_t dst_x, uint32_t dst_y, const void *vdata) {
+	return write_pixels(wlr_texture, stride, width, height, src_x, src_y,
+		dst_x, dst_y, vdata, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 		VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
-
-out:
-	wlr_buffer_end_data_ptr_access(buffer);
-	return ok;
 }
 
 void vulkan_texture_destroy(struct wlr_vk_texture *texture) {
-	if (texture->buffer != NULL) {
-		wlr_addon_finish(&texture->buffer_addon);
-		texture->buffer = NULL;
+	if (!texture->renderer) {
+		free(texture);
+		return;
 	}
 
 	// when we recorded a command to fill this image _this_ frame,
 	// it has to be executed before the texture can be destroyed.
 	// Add it to the renderer->destroy_textures list, destroying
 	// _after_ the stage command buffer has exectued
-	if (texture->last_used_cb != NULL) {
+	if (texture->last_used == texture->renderer->frame) {
 		assert(texture->destroy_link.next == NULL); // not already inserted
-		wl_list_insert(&texture->last_used_cb->destroy_textures,
+		wl_list_insert(&texture->renderer->destroy_textures,
 			&texture->destroy_link);
 		return;
 	}
 
 	wl_list_remove(&texture->link);
+	wl_list_remove(&texture->buffer_destroy.link);
 
 	VkDevice dev = texture->renderer->dev->dev;
-
-	struct wlr_vk_texture_view *view, *tmp_view;
-	wl_list_for_each_safe(view, tmp_view, &texture->views, link) {
-		vulkan_free_ds(texture->renderer, view->ds_pool, view->ds);
-		vkDestroyImageView(dev, view->image_view, NULL);
-		free(view);
+	if (texture->ds && texture->ds_pool) {
+		vulkan_free_ds(texture->renderer, texture->ds_pool, texture->ds);
 	}
 
-	for (size_t i = 0; i < WLR_DMABUF_MAX_PLANES; i++) {
-		if (texture->foreign_semaphores[i] != VK_NULL_HANDLE) {
-			vkDestroySemaphore(dev, texture->foreign_semaphores[i], NULL);
-		}
-	}
-
+	vkDestroyImageView(dev, texture->image_view, NULL);
 	vkDestroyImage(dev, texture->image, NULL);
 
 	for (unsigned i = 0u; i < texture->mem_count; ++i) {
@@ -250,136 +191,41 @@ static void vulkan_texture_unref(struct wlr_texture *wlr_texture) {
 }
 
 static const struct wlr_texture_impl texture_impl = {
-	.update_from_buffer = vulkan_texture_update_from_buffer,
+	.write_pixels = vulkan_texture_write_pixels,
 	.destroy = vulkan_texture_unref,
 };
 
 static struct wlr_vk_texture *vulkan_texture_create(
 		struct wlr_vk_renderer *renderer, uint32_t width, uint32_t height) {
-	struct wlr_vk_texture *texture = calloc(1, sizeof(*texture));
+	struct wlr_vk_texture *texture =
+		calloc(1, sizeof(struct wlr_vk_texture));
 	if (texture == NULL) {
 		wlr_log_errno(WLR_ERROR, "Allocation failed");
 		return NULL;
 	}
-	wlr_texture_init(&texture->wlr_texture, &renderer->wlr_renderer,
-		&texture_impl, width, height);
+	wlr_texture_init(&texture->wlr_texture, &texture_impl, width, height);
 	texture->renderer = renderer;
 	wl_list_insert(&renderer->textures, &texture->link);
-	wl_list_init(&texture->views);
+	wl_list_init(&texture->buffer_destroy.link);
 	return texture;
 }
 
-struct wlr_vk_texture_view *vulkan_texture_get_or_create_view(struct wlr_vk_texture *texture,
-		const struct wlr_vk_pipeline_layout *pipeline_layout) {
-	struct wlr_vk_texture_view *view;
-	wl_list_for_each(view, &texture->views, link) {
-		if (view->layout == pipeline_layout) {
-			return view;
-		}
-	}
+static struct wlr_texture *vulkan_texture_from_pixels(struct wlr_renderer *wlr_renderer,
+		uint32_t drm_fmt, uint32_t stride, uint32_t width,
+		uint32_t height, const void *data) {
+	struct wlr_vk_renderer *renderer = vulkan_get_renderer(wlr_renderer);
 
-	view = calloc(1, sizeof(*view));
-	if (!view) {
-		return NULL;
-	}
-
-	view->layout = pipeline_layout;
-
-	VkResult res;
-	VkDevice dev = texture->renderer->dev->dev;
-
-	VkImageViewCreateInfo view_info = {
-		.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-		.viewType = VK_IMAGE_VIEW_TYPE_2D,
-		.format = texture->format->vk,
-		.components.r = VK_COMPONENT_SWIZZLE_IDENTITY,
-		.components.g = VK_COMPONENT_SWIZZLE_IDENTITY,
-		.components.b = VK_COMPONENT_SWIZZLE_IDENTITY,
-		.components.a = texture->has_alpha || texture->format->is_ycbcr
-			? VK_COMPONENT_SWIZZLE_IDENTITY
-			: VK_COMPONENT_SWIZZLE_ONE,
-		.subresourceRange = (VkImageSubresourceRange){
-			.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-			.baseMipLevel = 0,
-			.levelCount = 1,
-			.baseArrayLayer = 0,
-			.layerCount = 1,
-		},
-		.image = texture->image,
-	};
-
-	VkSamplerYcbcrConversionInfo ycbcr_conversion_info;
-	if (texture->format->is_ycbcr) {
-		assert(pipeline_layout->ycbcr.conversion != VK_NULL_HANDLE);
-		ycbcr_conversion_info = (VkSamplerYcbcrConversionInfo){
-			.sType = VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_INFO,
-			.conversion = pipeline_layout->ycbcr.conversion,
-		};
-		view_info.pNext = &ycbcr_conversion_info;
-	}
-
-	res = vkCreateImageView(dev, &view_info, NULL, &view->image_view);
-	if (res != VK_SUCCESS) {
-		free(view);
-		wlr_vk_error("vkCreateImageView failed", res);
-		return NULL;
-	}
-
-	view->ds_pool = vulkan_alloc_texture_ds(texture->renderer, pipeline_layout->ds, &view->ds);
-	if (!view->ds_pool) {
-		free(view);
-		wlr_log(WLR_ERROR, "failed to allocate descriptor");
-		return NULL;
-	}
-
-	VkDescriptorImageInfo ds_img_info = {
-		.imageView = view->image_view,
-		.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-	};
-
-	VkWriteDescriptorSet ds_write = {
-		.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-		.descriptorCount = 1,
-		.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-		.dstSet = view->ds,
-		.pImageInfo = &ds_img_info,
-	};
-
-	vkUpdateDescriptorSets(dev, 1, &ds_write, 0, NULL);
-
-	wl_list_insert(&texture->views, &view->link);
-	return view;
-}
-
-static void texture_set_format(struct wlr_vk_texture *texture,
-		const struct wlr_vk_format *format) {
-	texture->format = format;
-	texture->transform = !format->is_ycbcr && format->is_srgb ?
-		WLR_VK_TEXTURE_TRANSFORM_IDENTITY : WLR_VK_TEXTURE_TRANSFORM_SRGB;
-
-	const struct wlr_pixel_format_info *format_info =
-		drm_get_pixel_format_info(format->drm);
-	if (format_info != NULL) {
-		texture->has_alpha = format_info->has_alpha;
-	} else {
-		// We don't have format info for multi-planar formats
-		assert(texture->format->is_ycbcr);
-	}
-}
-
-static struct wlr_texture *vulkan_texture_from_pixels(
-		struct wlr_vk_renderer *renderer, uint32_t drm_fmt, uint32_t stride,
-		uint32_t width, uint32_t height, const void *data) {
 	VkResult res;
 	VkDevice dev = renderer->dev->dev;
 
+	wlr_log(WLR_DEBUG, "vulkan_texture_from_pixels: %.4s, %dx%d",
+		(const char*) &drm_fmt, width, height);
+
 	const struct wlr_vk_format_props *fmt =
 		vulkan_format_props_from_drm(renderer->dev, drm_fmt);
-	if (fmt == NULL || fmt->format.is_ycbcr) {
-		char *format_name = drmGetFormatName(drm_fmt);
-		wlr_log(WLR_ERROR, "Unsupported pixel format %s (0x%08"PRIX32")",
-			format_name, drm_fmt);
-		free(format_name);
+	if (fmt == NULL) {
+		wlr_log(WLR_ERROR, "Unsupported pixel format %"PRIx32 " (%.4s)",
+			drm_fmt, (const char*) &drm_fmt);
 		return NULL;
 	}
 
@@ -388,21 +234,28 @@ static struct wlr_texture *vulkan_texture_from_pixels(
 		return NULL;
 	}
 
-	texture_set_format(texture, &fmt->format);
+	texture->format = &fmt->format;
 
-	VkImageCreateInfo img_info = {
-		.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-		.imageType = VK_IMAGE_TYPE_2D,
-		.format = texture->format->vk,
-		.mipLevels = 1,
-		.arrayLayers = 1,
-		.samples = VK_SAMPLE_COUNT_1_BIT,
-		.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-		.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-		.extent = (VkExtent3D) { width, height, 1 },
-		.tiling = VK_IMAGE_TILING_OPTIMAL,
-		.usage = vulkan_shm_tex_usage,
-	};
+	// create image
+	unsigned mem_bits = 0xFFFFFFFF;
+
+	VkImageCreateInfo img_info = {0};
+	img_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+	img_info.imageType = VK_IMAGE_TYPE_2D;
+	img_info.format = texture->format->vk_format;
+	img_info.mipLevels = 1;
+	img_info.arrayLayers = 1;
+	img_info.samples = VK_SAMPLE_COUNT_1_BIT;
+	img_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	img_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	img_info.extent = (VkExtent3D) { width, height, 1 };
+	img_info.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+
+	img_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+	img_info.usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+	mem_bits = vulkan_find_mem_type(renderer->dev,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, mem_bits);
+	VkImageLayout layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
 	res = vkCreateImage(dev, &img_info, NULL, &texture->image);
 	if (res != VK_SUCCESS) {
@@ -410,22 +263,14 @@ static struct wlr_texture *vulkan_texture_from_pixels(
 		goto error;
 	}
 
+	// memory
 	VkMemoryRequirements mem_reqs;
 	vkGetImageMemoryRequirements(dev, texture->image, &mem_reqs);
 
-	int mem_type_index = vulkan_find_mem_type(renderer->dev,
-		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, mem_reqs.memoryTypeBits);
-	if (mem_type_index == -1) {
-		wlr_log(WLR_ERROR, "failed to find suitable vulkan memory type");
-		goto error;
-	}
-
-	VkMemoryAllocateInfo mem_info = {
-		.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-		.allocationSize = mem_reqs.size,
-		.memoryTypeIndex = mem_type_index,
-	};
-
+	VkMemoryAllocateInfo mem_info = {0};
+	mem_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+	mem_info.allocationSize = mem_reqs.size;
+	mem_info.memoryTypeIndex = mem_bits & mem_reqs.memoryTypeBits;
 	res = vkAllocateMemory(dev, &mem_info, NULL, &texture->memories[0]);
 	if (res != VK_SUCCESS) {
 		wlr_vk_error("vkAllocatorMemory failed", res);
@@ -439,9 +284,56 @@ static struct wlr_texture *vulkan_texture_from_pixels(
 		goto error;
 	}
 
-	pixman_region32_t region;
-	pixman_region32_init_rect(&region, 0, 0, width, height);
-	if (!write_pixels(texture, stride, &region, data, VK_IMAGE_LAYOUT_UNDEFINED,
+	const struct wlr_pixel_format_info *format_info = drm_get_pixel_format_info(drm_fmt);
+	assert(format_info);
+
+	// view
+	VkImageViewCreateInfo view_info = {0};
+	view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+	view_info.format = texture->format->vk_format;
+	view_info.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
+	view_info.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
+	view_info.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
+	view_info.components.a = format_info->has_alpha
+		? VK_COMPONENT_SWIZZLE_IDENTITY
+		: VK_COMPONENT_SWIZZLE_ONE;
+
+	view_info.subresourceRange = (VkImageSubresourceRange) {
+		VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1
+	};
+	view_info.image = texture->image;
+
+	res = vkCreateImageView(dev, &view_info, NULL,
+		&texture->image_view);
+	if (res != VK_SUCCESS) {
+		wlr_vk_error("vkCreateImageView failed", res);
+		goto error;
+	}
+
+	// descriptor
+	texture->ds_pool = vulkan_alloc_texture_ds(renderer, &texture->ds);
+	if (!texture->ds_pool) {
+		wlr_log(WLR_ERROR, "failed to allocate descriptor");
+		goto error;
+	}
+
+	VkDescriptorImageInfo ds_img_info = {0};
+	ds_img_info.imageView = texture->image_view;
+	ds_img_info.imageLayout = layout;
+
+	VkWriteDescriptorSet ds_write = {0};
+	ds_write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	ds_write.descriptorCount = 1;
+	ds_write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	ds_write.dstSet = texture->ds;
+	ds_write.pImageInfo = &ds_img_info;
+
+	vkUpdateDescriptorSets(dev, 1, &ds_write, 0, NULL);
+
+	// write data
+	if (!write_pixels(&texture->wlr_texture, stride,
+			width, height, 0, 0, 0, 0, data, VK_IMAGE_LAYOUT_UNDEFINED,
 			VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0)) {
 		goto error;
 	}
@@ -487,34 +379,32 @@ VkImage vulkan_import_dmabuf(struct wlr_vk_renderer *renderer,
 	VkDevice dev = renderer->dev->dev;
 	*n_mems = 0u;
 
+	wlr_log(WLR_DEBUG, "vulkan_import_dmabuf: %.4s (mod %"PRIx64"), %dx%d, %d planes",
+		(const char *)&attribs->format, attribs->modifier,
+		attribs->width, attribs->height, attribs->n_planes);
+
 	struct wlr_vk_format_props *fmt = vulkan_format_props_from_drm(renderer->dev,
 		attribs->format);
 	if (fmt == NULL) {
-		char *format_name = drmGetFormatName(attribs->format);
-		wlr_log(WLR_ERROR, "Unsupported pixel format %s (0x%08"PRIX32")",
-			format_name, attribs->format);
-		free(format_name);
+		wlr_log(WLR_ERROR, "Unsupported pixel format %"PRIx32 " (%.4s)",
+			attribs->format, (const char*) &attribs->format);
 		return VK_NULL_HANDLE;
 	}
 
 	uint32_t plane_count = attribs->n_planes;
 	assert(plane_count < WLR_DMABUF_MAX_PLANES);
-	const struct wlr_vk_format_modifier_props *mod =
+	struct wlr_vk_format_modifier_props *mod =
 		vulkan_format_props_find_modifier(fmt, attribs->modifier, for_render);
-	if (!mod) {
-		char *format_name = drmGetFormatName(attribs->format);
-		char *modifier_name = drmGetFormatModifierName(attribs->modifier);
-		wlr_log(WLR_ERROR, "Format %s (0x%08"PRIX32") can't be used with modifier "
-			"%s (0x%016"PRIX64")", format_name, attribs->format,
-			modifier_name, attribs->modifier);
-		free(format_name);
-		free(modifier_name);
+	if (!mod || !(mod->dmabuf_flags & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT)) {
+		wlr_log(WLR_ERROR, "Format %"PRIx32" (%.4s) can't be used with modifier "
+			"%"PRIx64, attribs->format, (const char*) &attribs->format,
+			attribs->modifier);
 		return VK_NULL_HANDLE;
 	}
 
 	if ((uint32_t) attribs->width > mod->max_extent.width ||
 			(uint32_t) attribs->height > mod->max_extent.height) {
-		wlr_log(WLR_ERROR, "DMA-BUF is too large to import");
+		wlr_log(WLR_ERROR, "dmabuf is too large to import");
 		return VK_NULL_HANDLE;
 	}
 
@@ -532,32 +422,34 @@ VkImage vulkan_import_dmabuf(struct wlr_vk_renderer *renderer,
 		return VK_NULL_HANDLE;
 	}
 
+	// image
 	VkExternalMemoryHandleTypeFlagBits htype =
 		VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
 
-	VkImageCreateInfo img_info = {
-		.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-		.imageType = VK_IMAGE_TYPE_2D,
-		.format = fmt->format.vk,
-		.mipLevels = 1,
-		.arrayLayers = 1,
-		.samples = VK_SAMPLE_COUNT_1_BIT,
-		.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-		.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-		.extent = (VkExtent3D) { attribs->width, attribs->height, 1 },
-		.usage = for_render ? vulkan_render_usage : vulkan_dma_tex_usage,
-	};
+	VkImageCreateInfo img_info = {0};
+	img_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+	img_info.imageType = VK_IMAGE_TYPE_2D;
+	img_info.format = fmt->format.vk_format;
+	img_info.mipLevels = 1;
+	img_info.arrayLayers = 1;
+	img_info.samples = VK_SAMPLE_COUNT_1_BIT;
+	img_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	img_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	img_info.extent = (VkExtent3D) { attribs->width, attribs->height, 1 };
+	img_info.usage = for_render ?
+		VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT :
+		VK_IMAGE_USAGE_SAMPLED_BIT;
 	if (disjoint) {
 		img_info.flags = VK_IMAGE_CREATE_DISJOINT_BIT;
 	}
 
-	VkExternalMemoryImageCreateInfo eimg = {
-		.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
-		.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
-	};
+	VkExternalMemoryImageCreateInfo eimg = {0};
+	eimg.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
+	eimg.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
 	img_info.pNext = &eimg;
 
 	VkSubresourceLayout plane_layouts[WLR_DMABUF_MAX_PLANES] = {0};
+	VkImageDrmFormatModifierExplicitCreateInfoEXT mod_info = {0};
 
 	img_info.tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
 	for (unsigned i = 0u; i < plane_count; ++i) {
@@ -566,12 +458,10 @@ VkImage vulkan_import_dmabuf(struct wlr_vk_renderer *renderer,
 		plane_layouts[i].size = 0;
 	}
 
-	VkImageDrmFormatModifierExplicitCreateInfoEXT mod_info = {
-		.sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT,
-		.drmFormatModifierPlaneCount = plane_count,
-		.drmFormatModifier = mod->props.drmFormatModifier,
-		.pPlaneLayouts = plane_layouts,
-	};
+	mod_info.sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT;
+	mod_info.drmFormatModifierPlaneCount = plane_count;
+	mod_info.drmFormatModifier = mod->props.drmFormatModifier;
+	mod_info.pPlaneLayouts = plane_layouts;
 	eimg.pNext = &mod_info;
 
 	VkImage image;
@@ -586,33 +476,28 @@ VkImage vulkan_import_dmabuf(struct wlr_vk_renderer *renderer,
 	VkBindImagePlaneMemoryInfo planei[WLR_DMABUF_MAX_PLANES] = {0};
 
 	for (unsigned i = 0u; i < mem_count; ++i) {
-		VkMemoryFdPropertiesKHR fdp = {
-			.sType = VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR,
-		};
-		res = renderer->dev->api.vkGetMemoryFdPropertiesKHR(dev, htype,
+		struct VkMemoryFdPropertiesKHR fdp = {0};
+		fdp.sType = VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR;
+		res = renderer->dev->api.getMemoryFdPropertiesKHR(dev, htype,
 			attribs->fd[i], &fdp);
 		if (res != VK_SUCCESS) {
 			wlr_vk_error("getMemoryFdPropertiesKHR", res);
 			goto error_image;
 		}
 
-		VkImageMemoryRequirementsInfo2 memri = {
-			.image = image,
-			.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2,
-		};
+		VkImageMemoryRequirementsInfo2 memri = {0};
+		memri.image = image;
+		memri.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2;
 
-		VkImagePlaneMemoryRequirementsInfo planeri;
+		VkImagePlaneMemoryRequirementsInfo planeri = {0};
 		if (disjoint) {
-			planeri = (VkImagePlaneMemoryRequirementsInfo){
-				.sType = VK_STRUCTURE_TYPE_IMAGE_PLANE_MEMORY_REQUIREMENTS_INFO,
-				.planeAspect = mem_plane_aspect(i),
-			};
+			planeri.sType = VK_STRUCTURE_TYPE_IMAGE_PLANE_MEMORY_REQUIREMENTS_INFO;
+			planeri.planeAspect = mem_plane_aspect(i);
 			memri.pNext = &planeri;
 		}
 
-		VkMemoryRequirements2 memr = {
-			.sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2,
-		};
+		VkMemoryRequirements2 memr = {0};
+		memr.sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2;
 
 		vkGetImageMemoryRequirements2(dev, &memri, &memr);
 		int mem = vulkan_find_mem_type(renderer->dev, 0,
@@ -632,23 +517,20 @@ VkImage vulkan_import_dmabuf(struct wlr_vk_renderer *renderer,
 			goto error_image;
 		}
 
-		VkMemoryAllocateInfo memi = {
-			.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-			.allocationSize = memr.memoryRequirements.size,
-			.memoryTypeIndex = mem,
-		};
+		VkMemoryAllocateInfo memi = {0};
+		memi.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+		memi.allocationSize = memr.memoryRequirements.size;
+		memi.memoryTypeIndex = mem;
 
-		VkImportMemoryFdInfoKHR importi = {
-			.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR,
-			.fd = dfd,
-			.handleType = htype,
-		};
+		VkImportMemoryFdInfoKHR importi = {0};
+		importi.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR;
+		importi.fd = dfd;
+		importi.handleType = htype;
 		memi.pNext = &importi;
 
-		VkMemoryDedicatedAllocateInfo dedi = {
-			.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
-			.image = image,
-		};
+		VkMemoryDedicatedAllocateInfo dedi = {0};
+		dedi.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO;
+		dedi.image = image;
 		importi.pNext = &dedi;
 
 		res = vkAllocateMemory(dev, &memi, NULL, &mems[i]);
@@ -691,16 +573,18 @@ error_image:
 	return VK_NULL_HANDLE;
 }
 
-static struct wlr_vk_texture *vulkan_texture_from_dmabuf(
-		struct wlr_vk_renderer *renderer,
+static struct wlr_texture *vulkan_texture_from_dmabuf(struct wlr_renderer *wlr_renderer,
 		struct wlr_dmabuf_attributes *attribs) {
+	struct wlr_vk_renderer *renderer = vulkan_get_renderer(wlr_renderer);
+
+	VkResult res;
+	VkDevice dev = renderer->dev->dev;
+
 	const struct wlr_vk_format_props *fmt = vulkan_format_props_from_drm(
 		renderer->dev, attribs->format);
 	if (fmt == NULL) {
-		char *format_name = drmGetFormatName(attribs->format);
-		wlr_log(WLR_ERROR, "Unsupported pixel format %s (0x%08"PRIX32")",
-			format_name, attribs->format);
-		free(format_name);
+		wlr_log(WLR_ERROR, "Unsupported pixel format %"PRIx32 " (%.4s)",
+			attribs->format, (const char*) &attribs->format);
 		return NULL;
 	}
 
@@ -710,61 +594,102 @@ static struct wlr_vk_texture *vulkan_texture_from_dmabuf(
 		return NULL;
 	}
 
-	texture_set_format(texture, &fmt->format);
-
+	texture->format = &fmt->format;
 	texture->image = vulkan_import_dmabuf(renderer, attribs,
 		texture->memories, &texture->mem_count, false);
 	if (!texture->image) {
 		goto error;
 	}
 
+	const struct wlr_pixel_format_info *format_info = drm_get_pixel_format_info(attribs->format);
+	assert(format_info);
+
+	// view
+	VkImageViewCreateInfo view_info = {0};
+	view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+	view_info.format = texture->format->vk_format;
+	view_info.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
+	view_info.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
+	view_info.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
+	view_info.components.a = format_info->has_alpha
+		? VK_COMPONENT_SWIZZLE_IDENTITY
+		: VK_COMPONENT_SWIZZLE_ONE;
+
+	view_info.subresourceRange = (VkImageSubresourceRange) {
+		VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1
+	};
+	view_info.image = texture->image;
+
+	res = vkCreateImageView(dev, &view_info, NULL, &texture->image_view);
+	if (res != VK_SUCCESS) {
+		wlr_vk_error("vkCreateImageView failed", res);
+		goto error;
+	}
+
+	// descriptor
+	texture->ds_pool = vulkan_alloc_texture_ds(renderer, &texture->ds);
+	if (!texture->ds_pool) {
+		wlr_log(WLR_ERROR, "failed to allocate descriptor");
+		goto error;
+	}
+
+	VkDescriptorImageInfo ds_img_info = {0};
+	ds_img_info.imageView = texture->image_view;
+	ds_img_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+	VkWriteDescriptorSet ds_write = {0};
+	ds_write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	ds_write.descriptorCount = 1;
+	ds_write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	ds_write.dstSet = texture->ds;
+	ds_write.pImageInfo = &ds_img_info;
+
+	vkUpdateDescriptorSets(dev, 1, &ds_write, 0, NULL);
 	texture->dmabuf_imported = true;
 
-	return texture;
+	return &texture->wlr_texture;
 
 error:
 	vulkan_texture_destroy(texture);
 	return NULL;
 }
 
-static void texture_handle_buffer_destroy(struct wlr_addon *addon) {
+static void texture_handle_buffer_destroy(struct wl_listener *listener,
+		void *data) {
 	struct wlr_vk_texture *texture =
-		wl_container_of(addon, texture, buffer_addon);
-	// We might keep the texture around, waiting for pending command buffers to
-	// complete before free'ing descriptor sets.
+		wl_container_of(listener, texture, buffer_destroy);
 	vulkan_texture_destroy(texture);
 }
-
-static const struct wlr_addon_interface buffer_addon_impl = {
-	.name = "wlr_vk_texture",
-	.destroy = texture_handle_buffer_destroy,
-};
 
 static struct wlr_texture *vulkan_texture_from_dmabuf_buffer(
 		struct wlr_vk_renderer *renderer, struct wlr_buffer *buffer,
 		struct wlr_dmabuf_attributes *dmabuf) {
-	struct wlr_addon *addon =
-		wlr_addon_find(&buffer->addons, renderer, &buffer_addon_impl);
-	if (addon != NULL) {
-		struct wlr_vk_texture *texture =
-			wl_container_of(addon, texture, buffer_addon);
-		wlr_buffer_lock(texture->buffer);
-		return &texture->wlr_texture;
+	struct wlr_vk_texture *texture;
+	wl_list_for_each(texture, &renderer->textures, link) {
+		if (texture->buffer == buffer) {
+			wlr_buffer_lock(texture->buffer);
+			return &texture->wlr_texture;
+		}
 	}
 
-	struct wlr_vk_texture *texture = vulkan_texture_from_dmabuf(renderer, dmabuf);
-	if (texture == NULL) {
+	struct wlr_texture *wlr_texture =
+		vulkan_texture_from_dmabuf(&renderer->wlr_renderer, dmabuf);
+	if (wlr_texture == NULL) {
 		return false;
 	}
 
+	texture = vulkan_get_texture(wlr_texture);
 	texture->buffer = wlr_buffer_lock(buffer);
-	wlr_addon_init(&texture->buffer_addon, &buffer->addons, renderer,
-		&buffer_addon_impl);
+
+	texture->buffer_destroy.notify = texture_handle_buffer_destroy;
+	wl_signal_add(&buffer->events.destroy, &texture->buffer_destroy);
 
 	return &texture->wlr_texture;
 }
 
-struct wlr_texture *vulkan_texture_from_buffer(struct wlr_renderer *wlr_renderer,
+struct wlr_texture *vulkan_texture_from_buffer(
+		struct wlr_renderer *wlr_renderer,
 		struct wlr_buffer *buffer) {
 	struct wlr_vk_renderer *renderer = vulkan_get_renderer(wlr_renderer);
 
@@ -776,25 +701,11 @@ struct wlr_texture *vulkan_texture_from_buffer(struct wlr_renderer *wlr_renderer
 		return vulkan_texture_from_dmabuf_buffer(renderer, buffer, &dmabuf);
 	} else if (wlr_buffer_begin_data_ptr_access(buffer,
 			WLR_BUFFER_DATA_PTR_ACCESS_READ, &data, &format, &stride)) {
-		struct wlr_texture *tex = vulkan_texture_from_pixels(renderer,
+		struct wlr_texture *tex = vulkan_texture_from_pixels(wlr_renderer,
 			format, stride, buffer->width, buffer->height, data);
 		wlr_buffer_end_data_ptr_access(buffer);
 		return tex;
 	} else {
 		return NULL;
 	}
-}
-
-void wlr_vk_texture_get_image_attribs(struct wlr_texture *texture,
-		struct wlr_vk_image_attribs *attribs) {
-	struct wlr_vk_texture *vk_texture = vulkan_get_texture(texture);
-	attribs->image = vk_texture->image;
-	attribs->format = vk_texture->format->vk;
-	attribs->layout = vk_texture->transitioned ?
-		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
-}
-
-bool wlr_vk_texture_has_alpha(struct wlr_texture *texture) {
-	struct wlr_vk_texture *vk_texture = vulkan_get_texture(texture);
-	return vk_texture->has_alpha;
 }
