@@ -14,7 +14,6 @@
 #include <wlr/types/wlr_output.h>
 
 struct wlr_input_device;
-struct wlr_xcursor_manager;
 
 /**
  * wlr_cursor implements the behavior of the "cursor", that is, the image on the
@@ -137,26 +136,15 @@ void wlr_cursor_move(struct wlr_cursor *cur, struct wlr_input_device *dev,
 	double delta_x, double delta_y);
 
 /**
- * Set the cursor buffer.
+ * Set the cursor image. stride is given in bytes. If pixels is NULL, hides the
+ * cursor.
  *
- * The buffer is used on all outputs and is scaled accordingly. The hotspot is
- * expressed in logical coordinates. A NULL buffer hides the cursor.
+ * If scale isn't zero, the image is only set on outputs having the provided
+ * scale.
  */
-void wlr_cursor_set_buffer(struct wlr_cursor *cur, struct wlr_buffer *buffer,
-	int32_t hotspot_x, int32_t hotspot_y, float scale);
-
-/**
- * Hide the cursor image.
- */
-void wlr_cursor_unset_image(struct wlr_cursor *cur);
-
-/**
- * Set the cursor image from an XCursor theme.
- *
- * The image will be loaded from the struct wlr_xcursor_manager.
- */
-void wlr_cursor_set_xcursor(struct wlr_cursor *cur,
-	struct wlr_xcursor_manager *manager, const char *name);
+void wlr_cursor_set_image(struct wlr_cursor *cur, const uint8_t *pixels,
+	int32_t stride, uint32_t width, uint32_t height, int32_t hotspot_x,
+	int32_t hotspot_y, float scale);
 
 /**
  * Set the cursor surface. The surface can be committed to update the cursor

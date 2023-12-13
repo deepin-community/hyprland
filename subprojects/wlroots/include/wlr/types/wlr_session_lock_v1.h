@@ -17,7 +17,7 @@ struct wlr_session_lock_manager_v1 {
 	struct wl_global *global;
 
 	struct {
-		struct wl_signal new_lock; // struct wlr_session_lock_v1
+		struct wl_signal new_lock; // struct wlr_session_lock_v1 *
 		struct wl_signal destroy;
 	} events;
 
@@ -34,16 +34,12 @@ struct wlr_session_lock_v1 {
 	struct wl_list surfaces; // struct wlr_session_lock_surface_v1.link
 
 	struct {
-		struct wl_signal new_surface; // struct wlr_session_lock_surface_v1
+		struct wl_signal new_surface; // struct wlr_session_lock_surface_v1 *
 		struct wl_signal unlock;
 		struct wl_signal destroy;
 	} events;
 
 	void *data;
-
-	// private state
-
-	bool locked_sent;
 };
 
 struct wlr_session_lock_surface_v1_state {
@@ -65,7 +61,7 @@ struct wlr_session_lock_surface_v1 {
 	struct wlr_output *output;
 	struct wlr_surface *surface;
 
-	bool configured;
+	bool configured, mapped;
 
 	struct wl_list configure_list; // wlr_session_lock_surface_v1_configure.link
 
@@ -73,6 +69,7 @@ struct wlr_session_lock_surface_v1 {
 	struct wlr_session_lock_surface_v1_state pending;
 
 	struct {
+		struct wl_signal map;
 		struct wl_signal destroy;
 	} events;
 
@@ -81,6 +78,7 @@ struct wlr_session_lock_surface_v1 {
 	// private state
 
 	struct wl_listener output_destroy;
+	struct wl_listener surface_destroy;
 };
 
 struct wlr_session_lock_manager_v1 *wlr_session_lock_manager_v1_create(
@@ -94,12 +92,17 @@ uint32_t wlr_session_lock_surface_v1_configure(
 	uint32_t width, uint32_t height);
 
 /**
- * Get a struct wlr_session_lock_surface_v1 from a struct wlr_surface.
- *
- * Returns NULL if the surface has a different role or if the lock surface
- * has been destroyed.
+ * Returns true if the surface has the session lock surface role.
  */
-struct wlr_session_lock_surface_v1 *wlr_session_lock_surface_v1_try_from_wlr_surface(
+bool wlr_surface_is_session_lock_surface_v1(struct wlr_surface *surface);
+
+/**
+ * Get a struct wlr_session_lock_surface_v1 from a struct wlr_surface.
+ * Asserts that the surface has the session lock surface role.
+ * May return NULL even if the surface has the session lock surface role if the
+ * corresponding session lock surface has been destroyed.
+ */
+struct wlr_session_lock_surface_v1 *wlr_session_lock_surface_v1_from_wlr_surface(
 	struct wlr_surface *surface);
 
 #endif

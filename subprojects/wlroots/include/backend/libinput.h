@@ -12,8 +12,6 @@
 #include <wlr/types/wlr_tablet_tool.h>
 #include <wlr/types/wlr_touch.h>
 
-#include "config.h"
-
 struct wlr_libinput_backend {
 	struct wlr_backend backend;
 
@@ -27,7 +25,7 @@ struct wlr_libinput_backend {
 	struct wl_listener session_destroy;
 	struct wl_listener session_signal;
 
-	struct wl_list devices; // wlr_libinput_device.link
+	struct wl_list devices; // wlr_libinput_device::link
 };
 
 struct wlr_libinput_input_device {
@@ -72,7 +70,7 @@ void handle_pointer_button(struct libinput_event *event,
 	struct wlr_pointer *pointer);
 void handle_pointer_axis(struct libinput_event *event,
 	struct wlr_pointer *pointer);
-#if HAVE_LIBINPUT_SCROLL_VALUE120
+#if LIBINPUT_HAS_SCROLL_VALUE120
 void handle_pointer_axis_value120(struct libinput_event *event,
 	struct wlr_pointer *pointer, enum wlr_axis_source source);
 #endif

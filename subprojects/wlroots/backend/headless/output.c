@@ -2,33 +2,31 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <wlr/interfaces/wlr_output.h>
-#include <wlr/types/wlr_output_layer.h>
 #include <wlr/util/log.h>
 #include "backend/headless.h"
-#include "types/wlr_output.h"
+#include "util/signal.h"
 
 static const uint32_t SUPPORTED_OUTPUT_STATE =
 	WLR_OUTPUT_STATE_BACKEND_OPTIONAL |
 	WLR_OUTPUT_STATE_BUFFER |
-	WLR_OUTPUT_STATE_ENABLED |
 	WLR_OUTPUT_STATE_MODE;
-
-static size_t last_output_num = 0;
 
 static struct wlr_headless_output *headless_output_from_output(
 		struct wlr_output *wlr_output) {
 	assert(wlr_output_is_headless(wlr_output));
-	struct wlr_headless_output *output = wl_container_of(wlr_output, output, wlr_output);
-	return output;
+	return (struct wlr_headless_output *)wlr_output;
 }
 
-static void output_update_refresh(struct wlr_headless_output *output,
-		int32_t refresh) {
+static bool output_set_custom_mode(struct wlr_headless_output *output,
+		int32_t width, int32_t height, int32_t refresh) {
 	if (refresh <= 0) {
 		refresh = HEADLESS_DEFAULT_REFRESH;
 	}
 
 	output->frame_delay = 1000000 / refresh;
+
+	wlr_output_update_custom_mode(&output->wlr_output, width, height, refresh);
+	return true;
 }
 
 static bool output_test(struct wlr_output *wlr_output,
@@ -44,12 +42,6 @@ static bool output_test(struct wlr_output *wlr_output,
 		assert(state->mode_type == WLR_OUTPUT_STATE_MODE_CUSTOM);
 	}
 
-	if (state->committed & WLR_OUTPUT_STATE_LAYERS) {
-		for (size_t i = 0; i < state->layers_len; i++) {
-			state->layers[i].accepted = true;
-		}
-	}
-
 	return true;
 }
 
@@ -63,18 +55,23 @@ static bool output_commit(struct wlr_output *wlr_output,
 	}
 
 	if (state->committed & WLR_OUTPUT_STATE_MODE) {
-		output_update_refresh(output, state->custom_mode.refresh);
+		if (!output_set_custom_mode(output,
+				state->custom_mode.width,
+				state->custom_mode.height,
+				state->custom_mode.refresh)) {
+			return false;
+		}
 	}
 
-	if (output_pending_enabled(wlr_output, state)) {
+	if (state->committed & WLR_OUTPUT_STATE_BUFFER) {
 		struct wlr_output_event_present present_event = {
 			.commit_seq = wlr_output->commit_seq + 1,
 			.presented = true,
 		};
-		output_defer_present(wlr_output, present_event);
-
-		wl_event_source_timer_update(output->frame_timer, output->frame_delay);
+		wlr_output_send_present(wlr_output, &present_event);
 	}
+
+	wl_event_source_timer_update(output->frame_timer, output->frame_delay);
 
 	return true;
 }
@@ -107,31 +104,26 @@ struct wlr_output *wlr_headless_add_output(struct wlr_backend *wlr_backend,
 	struct wlr_headless_backend *backend =
 		headless_backend_from_backend(wlr_backend);
 
-	struct wlr_headless_output *output = calloc(1, sizeof(*output));
+	struct wlr_headless_output *output =
+		calloc(1, sizeof(struct wlr_headless_output));
 	if (output == NULL) {
 		wlr_log(WLR_ERROR, "Failed to allocate wlr_headless_output");
 		return NULL;
 	}
 	output->backend = backend;
+	wlr_output_init(&output->wlr_output, &backend->backend, &output_impl,
+		backend->display);
 	struct wlr_output *wlr_output = &output->wlr_output;
 
-	struct wlr_output_state state;
-	wlr_output_state_init(&state);
-	wlr_output_state_set_custom_mode(&state, width, height, 0);
-
-	wlr_output_init(wlr_output, &backend->backend, &output_impl, backend->display, &state);
-	wlr_output_state_finish(&state);
-
-	output_update_refresh(output, 0);
-
-	size_t output_num = ++last_output_num;
+	output_set_custom_mode(output, width, height, 0);
 
 	char name[64];
-	snprintf(name, sizeof(name), "HEADLESS-%zu", output_num);
+	snprintf(name, sizeof(name), "HEADLESS-%zu", ++backend->last_output_num);
 	wlr_output_set_name(wlr_output, name);
 
 	char description[128];
-	snprintf(description, sizeof(description), "Headless output %zu", output_num);
+	snprintf(description, sizeof(description),
+		"Headless output %zu", backend->last_output_num);
 	wlr_output_set_description(wlr_output, description);
 
 	struct wl_event_loop *ev = wl_display_get_event_loop(backend->display);
@@ -140,7 +132,9 @@ struct wlr_output *wlr_headless_add_output(struct wlr_backend *wlr_backend,
 	wl_list_insert(&backend->outputs, &output->link);
 
 	if (backend->started) {
-		wl_signal_emit_mutable(&backend->backend.events.new_output, wlr_output);
+		wl_event_source_timer_update(output->frame_timer, output->frame_delay);
+		wlr_output_update_enabled(wlr_output, true);
+		wlr_signal_emit_safe(&backend->backend.events.new_output, wlr_output);
 	}
 
 	return wlr_output;

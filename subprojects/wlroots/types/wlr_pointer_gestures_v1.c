@@ -9,6 +9,7 @@
 #include <wlr/types/wlr_pointer.h>
 #include <wlr/types/wlr_pointer_gestures_v1.h>
 #include <wlr/util/log.h>
+#include "util/signal.h"
 #include "pointer-gestures-unstable-v1-protocol.h"
 
 #define POINTER_GESTURES_VERSION 3
@@ -407,7 +408,8 @@ static void handle_display_destroy(struct wl_listener *listener, void *data) {
 
 struct wlr_pointer_gestures_v1 *wlr_pointer_gestures_v1_create(
 		struct wl_display *display) {
-	struct wlr_pointer_gestures_v1 *gestures = calloc(1, sizeof(*gestures));
+	struct wlr_pointer_gestures_v1 *gestures =
+		calloc(1, sizeof(struct wlr_pointer_gestures_v1));
 	if (!gestures) {
 		return NULL;
 	}

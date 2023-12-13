@@ -3,9 +3,7 @@ packages:
   - eudev-dev
   - ffmpeg-dev
   - glslang
-  - libdisplay-info-dev
   - libinput-dev
-  - libliftoff-dev
   - libxkbcommon-dev
   - mesa-dev
   - meson
@@ -17,15 +15,14 @@ packages:
   - xcb-util-image-dev
   - xcb-util-renderutil-dev
   - xcb-util-wm-dev
-  - xwayland-dev
+  - xwayland
   - libseat-dev
-  - hwdata-dev
 sources:
   - https://gitlab.freedesktop.org/wlroots/wlroots.git
 tasks:
   - setup: |
       cd wlroots
-      meson setup build --fatal-meson-warnings --default-library=both -Dauto_features=enabled -Dxcb-errors=disabled
+      meson build --fatal-meson-warnings --default-library=both -Dauto_features=enabled -Dxcb-errors=disabled
   - build: |
       cd wlroots
       ninja -C build

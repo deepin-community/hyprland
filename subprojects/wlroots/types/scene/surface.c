@@ -1,23 +1,7 @@
-#include <assert.h>
 #include <stdlib.h>
-#include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_scene.h>
-#include <wlr/types/wlr_fractional_scale_v1.h>
 #include <wlr/types/wlr_presentation_time.h>
 #include "types/wlr_scene.h"
-
-static void handle_scene_buffer_outputs_update(
-		struct wl_listener *listener, void *data) {
-	struct wlr_scene_surface *surface =
-		wl_container_of(listener, surface, outputs_update);
-
-	if (surface->buffer->primary_output == NULL) {
-		return;
-	}
-	double scale = surface->buffer->primary_output->output->scale;
-	wlr_fractional_scale_v1_notify_scale(surface->surface, scale);
-	wlr_surface_set_preferred_buffer_scale(surface->surface, ceil(scale));
-}
 
 static void handle_scene_buffer_output_enter(
 		struct wl_listener *listener, void *data) {
@@ -37,27 +21,20 @@ static void handle_scene_buffer_output_leave(
 	wlr_surface_send_leave(surface->surface, output->output);
 }
 
-static void handle_scene_buffer_output_sample(
+static void handle_scene_buffer_output_present(
 		struct wl_listener *listener, void *data) {
 	struct wlr_scene_surface *surface =
-		wl_container_of(listener, surface, output_sample);
-	const struct wlr_scene_output_sample_event *event = data;
-	struct wlr_scene_output *scene_output = event->output;
-	if (surface->buffer->primary_output != scene_output) {
-		return;
-	}
+		wl_container_of(listener, surface, output_present);
+	struct wlr_scene_output *scene_output = data;
 
-	struct wlr_scene *root = scene_node_get_root(&surface->buffer->node);
-	if (!root->presentation) {
-		return;
-	}
+	if (surface->buffer->primary_output == scene_output) {
+		struct wlr_scene *root = scene_node_get_root(&surface->buffer->node);
+		struct wlr_presentation *presentation = root->presentation;
 
-	if (event->direct_scanout) {
-		wlr_presentation_surface_scanned_out_on_output(
-			root->presentation, surface->surface, scene_output->output);
-	} else {
-		wlr_presentation_surface_textured_on_output(
-			root->presentation, surface->surface, scene_output->output);
+		if (presentation) {
+			wlr_presentation_surface_sampled_on_output(
+				presentation, surface->surface, scene_output->output);
+		}
 	}
 }
 
@@ -78,33 +55,9 @@ static void scene_surface_handle_surface_destroy(
 	wlr_scene_node_destroy(&surface->buffer->node);
 }
 
-// This is used for wlr_scene where it unconditionally locks buffers preventing
-// reuse of the existing texture for shm clients. With the usage pattern of
-// wlr_scene surface handling, we can mark its locked buffer as safe
-// for mutation.
-static void client_buffer_mark_next_can_damage(struct wlr_client_buffer *buffer) {
-	buffer->n_ignore_locks++;
-}
-
-static void scene_buffer_unmark_client_buffer(struct wlr_scene_buffer *scene_buffer) {
-	if (!scene_buffer->buffer) {
-		return;
-	}
-
-	struct wlr_client_buffer *buffer = wlr_client_buffer_get(scene_buffer->buffer);
-	if (!buffer) {
-		return;
-	}
-
-	assert(buffer->n_ignore_locks > 0);
-	buffer->n_ignore_locks--;
-}
-
 static void set_buffer_with_surface_state(struct wlr_scene_buffer *scene_buffer,
 		struct wlr_surface *surface) {
 	struct wlr_surface_state *state = &surface->current;
-
-	wlr_scene_buffer_set_opaque_region(scene_buffer, &surface->opaque_region);
 
 	struct wlr_fbox src_box;
 	wlr_surface_get_buffer_source_box(surface, &src_box);
@@ -113,11 +66,7 @@ static void set_buffer_with_surface_state(struct wlr_scene_buffer *scene_buffer,
 	wlr_scene_buffer_set_dest_size(scene_buffer, state->width, state->height);
 	wlr_scene_buffer_set_transform(scene_buffer, state->transform);
 
-	scene_buffer_unmark_client_buffer(scene_buffer);
-
 	if (surface->buffer) {
-		client_buffer_mark_next_can_damage(surface->buffer);
-
 		wlr_scene_buffer_set_buffer_with_damage(scene_buffer,
 			&surface->buffer->base, &surface->buffer_damage);
 	} else {
@@ -133,11 +82,10 @@ static void handle_scene_surface_surface_commit(
 
 	set_buffer_with_surface_state(scene_buffer, surface->surface);
 
-	// If the surface has requested a frame done event, honour that. The
-	// frame_callback_list will be populated in this case. We should only
-	// schedule the frame however if the node is enabled and there is an
-	// output intersecting, otherwise the frame done events would never reach
-	// the surface anyway.
+	// Even if the surface hasn't submitted damage, schedule a new frame if
+	// the client has requested a wl_surface.frame callback. Check if the node
+	// is visible. If not, the client will never receive a frame_done event
+	// anyway so it doesn't make sense to schedule here.
 	int lx, ly;
 	bool enabled = wlr_scene_node_coords(&scene_buffer->node, &lx, &ly);
 
@@ -150,7 +98,7 @@ static void handle_scene_surface_surface_commit(
 static bool scene_buffer_point_accepts_input(struct wlr_scene_buffer *scene_buffer,
 		int sx, int sy) {
 	struct wlr_scene_surface *scene_surface =
-		wlr_scene_surface_try_from_buffer(scene_buffer);
+		wlr_scene_surface_from_buffer(scene_buffer);
 
 	return wlr_surface_point_accepts_input(scene_surface->surface, sx, sy);
 }
@@ -158,14 +106,11 @@ static bool scene_buffer_point_accepts_input(struct wlr_scene_buffer *scene_buff
 static void surface_addon_destroy(struct wlr_addon *addon) {
 	struct wlr_scene_surface *surface = wl_container_of(addon, surface, addon);
 
-	scene_buffer_unmark_client_buffer(surface->buffer);
-
 	wlr_addon_finish(&surface->addon);
 
-	wl_list_remove(&surface->outputs_update.link);
 	wl_list_remove(&surface->output_enter.link);
 	wl_list_remove(&surface->output_leave.link);
-	wl_list_remove(&surface->output_sample.link);
+	wl_list_remove(&surface->output_present.link);
 	wl_list_remove(&surface->frame_done.link);
 	wl_list_remove(&surface->surface_destroy.link);
 	wl_list_remove(&surface->surface_commit.link);
@@ -178,7 +123,7 @@ static const struct wlr_addon_interface surface_addon_impl = {
 	.destroy = surface_addon_destroy,
 };
 
-struct wlr_scene_surface *wlr_scene_surface_try_from_buffer(
+struct wlr_scene_surface *wlr_scene_surface_from_buffer(
 		struct wlr_scene_buffer *scene_buffer) {
 	struct wlr_addon *addon = wlr_addon_find(&scene_buffer->node.addons,
 		scene_buffer, &surface_addon_impl);
@@ -207,17 +152,14 @@ struct wlr_scene_surface *wlr_scene_surface_create(struct wlr_scene_tree *parent
 	surface->surface = wlr_surface;
 	scene_buffer->point_accepts_input = scene_buffer_point_accepts_input;
 
-	surface->outputs_update.notify = handle_scene_buffer_outputs_update;
-	wl_signal_add(&scene_buffer->events.outputs_update, &surface->outputs_update);
-
 	surface->output_enter.notify = handle_scene_buffer_output_enter;
 	wl_signal_add(&scene_buffer->events.output_enter, &surface->output_enter);
 
 	surface->output_leave.notify = handle_scene_buffer_output_leave;
 	wl_signal_add(&scene_buffer->events.output_leave, &surface->output_leave);
 
-	surface->output_sample.notify = handle_scene_buffer_output_sample;
-	wl_signal_add(&scene_buffer->events.output_sample, &surface->output_sample);
+	surface->output_present.notify = handle_scene_buffer_output_present;
+	wl_signal_add(&scene_buffer->events.output_present, &surface->output_present);
 
 	surface->frame_done.notify = handle_scene_buffer_frame_done;
 	wl_signal_add(&scene_buffer->events.frame_done, &surface->frame_done);

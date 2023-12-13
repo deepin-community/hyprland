@@ -437,7 +437,7 @@ int main(int argc, char **argv) {
 
 	/* Initialize EGL context */
 
-	struct egl_info *e = calloc(1, sizeof(*e));
+	struct egl_info *e = calloc(1, sizeof(struct egl_info));
 	e->width = e->height = 512;
 
 	egl_init(display);
@@ -465,7 +465,7 @@ int main(int argc, char **argv) {
 
 	/* Setup global state and render */
 
-	struct window *w = calloc(1, sizeof(*w));
+	struct window *w = calloc(1, sizeof(struct window));
 	w->egl_info = e;
 
 	draw_init(e);

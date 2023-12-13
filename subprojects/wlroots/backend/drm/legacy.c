@@ -38,7 +38,7 @@ static bool legacy_crtc_test(struct wlr_drm_connector *conn,
 	struct wlr_drm_crtc *crtc = conn->crtc;
 
 	if ((state->base->committed & WLR_OUTPUT_STATE_BUFFER) && !state->modeset) {
-		struct wlr_drm_fb *pending_fb = state->primary_fb;
+		struct wlr_drm_fb *pending_fb = crtc->primary->pending_fb;
 
 		struct wlr_drm_fb *prev_fb = crtc->primary->queued_fb;
 		if (!prev_fb) {
@@ -74,12 +74,13 @@ static bool legacy_crtc_commit(struct wlr_drm_connector *conn,
 
 	uint32_t fb_id = 0;
 	if (state->active) {
-		if (state->primary_fb == NULL) {
+		struct wlr_drm_fb *fb = plane_get_next_fb(crtc->primary);
+		if (fb == NULL) {
 			wlr_log(WLR_ERROR, "%s: failed to acquire primary FB",
 				conn->output.name);
 			return false;
 		}
-		fb_id = state->primary_fb->id;
+		fb_id = fb->id;
 	}
 
 	if (state->modeset) {
@@ -114,10 +115,8 @@ static bool legacy_crtc_commit(struct wlr_drm_connector *conn,
 		}
 	}
 
-	if (state->base->committed & WLR_OUTPUT_STATE_ADAPTIVE_SYNC_ENABLED) {
-		if (!drm_connector_supports_vrr(conn)) {
-			return false;
-		}
+	if ((state->base->committed & WLR_OUTPUT_STATE_ADAPTIVE_SYNC_ENABLED) &&
+			drm_connector_supports_vrr(conn)) {
 		if (drmModeObjectSetProperty(drm->fd, crtc->id, DRM_MODE_OBJECT_CRTC,
 				crtc->props.vrr_enabled,
 				state->base->adaptive_sync_enabled) != 0) {
@@ -133,7 +132,7 @@ static bool legacy_crtc_commit(struct wlr_drm_connector *conn,
 	}
 
 	if (cursor != NULL && drm_connector_is_cursor_visible(conn)) {
-		struct wlr_drm_fb *cursor_fb = get_next_cursor_fb(conn);
+		struct wlr_drm_fb *cursor_fb = plane_get_next_fb(cursor);
 		if (cursor_fb == NULL) {
 			wlr_drm_conn_log(conn, WLR_DEBUG, "Failed to acquire cursor FB");
 			return false;
@@ -163,7 +162,7 @@ static bool legacy_crtc_commit(struct wlr_drm_connector *conn,
 		}
 
 		if (drmModeMoveCursor(drm->fd,
-				crtc->id, conn->cursor_x, conn->cursor_y) != 0) {
+			crtc->id, conn->cursor_x, conn->cursor_y) != 0) {
 			wlr_drm_conn_log_errno(conn, WLR_ERROR, "drmModeMoveCursor failed");
 			return false;
 		}
@@ -175,13 +174,8 @@ static bool legacy_crtc_commit(struct wlr_drm_connector *conn,
 	}
 
 	if (flags & DRM_MODE_PAGE_FLIP_EVENT) {
-		uint32_t page_flags = DRM_MODE_PAGE_FLIP_EVENT;
-		if (flags & DRM_MODE_PAGE_FLIP_ASYNC) {
-			page_flags |= DRM_MODE_PAGE_FLIP_ASYNC;
-		}
-
 		if (drmModePageFlip(drm->fd, crtc->id, fb_id,
-				page_flags, drm)) {
+				DRM_MODE_PAGE_FLIP_EVENT, drm)) {
 			wlr_drm_conn_log_errno(conn, WLR_ERROR, "drmModePageFlip failed");
 			return false;
 		}

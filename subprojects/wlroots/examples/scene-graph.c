@@ -57,7 +57,7 @@ struct output {
 static void output_handle_frame(struct wl_listener *listener, void *data) {
 	struct output *output = wl_container_of(listener, output, frame);
 
-	if (!wlr_scene_output_commit(output->scene_output, NULL)) {
+	if (!wlr_scene_output_commit(output->scene_output)) {
 		return;
 	}
 
@@ -72,7 +72,8 @@ static void server_handle_new_output(struct wl_listener *listener, void *data) {
 
 	wlr_output_init_render(wlr_output, server->allocator, server->renderer);
 
-	struct output *output = calloc(1, sizeof(*output));
+	struct output *output =
+		calloc(1, sizeof(struct output));
 	output->wlr = wlr_output;
 	output->server = server;
 	output->frame.notify = output_handle_frame;
@@ -80,15 +81,11 @@ static void server_handle_new_output(struct wl_listener *listener, void *data) {
 
 	output->scene_output = wlr_scene_output_create(server->scene, wlr_output);
 
-	struct wlr_output_state state;
-	wlr_output_state_init(&state);
-	wlr_output_state_set_enabled(&state, true);
-	struct wlr_output_mode *mode = wlr_output_preferred_mode(wlr_output);
-	if (mode != NULL) {
-		wlr_output_state_set_mode(&state, mode);
+	if (!wl_list_empty(&wlr_output->modes)) {
+		struct wlr_output_mode *mode = wlr_output_preferred_mode(wlr_output);
+		wlr_output_set_mode(wlr_output, mode);
+		wlr_output_commit(wlr_output);
 	}
-	wlr_output_commit_state(wlr_output, &state);
-	wlr_output_state_finish(&state);
 
 	wlr_output_create_global(wlr_output);
 }
@@ -117,7 +114,7 @@ static void server_handle_new_surface(struct wl_listener *listener,
 	int pos = server->surface_offset;
 	server->surface_offset += 50;
 
-	struct surface *surface = calloc(1, sizeof(*surface));
+	struct surface *surface = calloc(1, sizeof(struct surface));
 	surface->wlr = wlr_surface;
 	surface->commit.notify = surface_handle_commit;
 	wl_signal_add(&wlr_surface->events.commit, &surface->commit);
@@ -160,7 +157,7 @@ int main(int argc, char *argv[]) {
 	struct server server = {0};
 	server.surface_offset = 0;
 	server.display = wl_display_create();
-	server.backend = wlr_backend_autocreate(server.display, NULL);
+	server.backend = wlr_backend_autocreate(server.display);
 	server.scene = wlr_scene_create();
 
 	server.renderer = wlr_renderer_autocreate(server.backend);
@@ -170,7 +167,7 @@ int main(int argc, char *argv[]) {
 		server.renderer);
 
 	struct wlr_compositor *compositor =
-		wlr_compositor_create(server.display, 5, server.renderer);
+		wlr_compositor_create(server.display, server.renderer);
 
 	wlr_xdg_shell_create(server.display, 2);
 

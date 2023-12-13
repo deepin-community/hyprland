@@ -1,4 +1,5 @@
 #include <wlr/types/wlr_xdg_foreign_registry.h>
+#include "util/signal.h"
 #include "util/token.h"
 #include <assert.h>
 #include <stdlib.h>
@@ -37,7 +38,7 @@ struct wlr_xdg_foreign_exported *wlr_xdg_foreign_registry_find_by_handle(
 }
 
 void wlr_xdg_foreign_exported_finish(struct wlr_xdg_foreign_exported *surface) {
-	wl_signal_emit_mutable(&surface->events.destroy, NULL);
+	wlr_signal_emit_safe(&surface->events.destroy, NULL);
 	surface->registry = NULL;
 	wl_list_remove(&surface->link);
 	wl_list_init(&surface->link);
@@ -48,7 +49,7 @@ static void foreign_registry_handle_display_destroy(struct wl_listener *listener
 	struct wlr_xdg_foreign_registry *registry =
 		wl_container_of(listener, registry, display_destroy);
 
-	wl_signal_emit_mutable(&registry->events.destroy, NULL);
+	wlr_signal_emit_safe(&registry->events.destroy, NULL);
 
 	// Implementations are supposed to remove all surfaces
 	assert(wl_list_empty(&registry->exported_surfaces));

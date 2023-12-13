@@ -2,7 +2,6 @@
 #define BACKEND_DRM_PROPERTIES_H
 
 #include <stdbool.h>
-#include <stddef.h>
 #include <stdint.h>
 
 /*

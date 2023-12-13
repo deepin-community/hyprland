@@ -3,6 +3,18 @@
 #include "wlr/types/wlr_switch.h"
 #include <ranges>
 
+CInputManager::~CInputManager() {
+    m_lConstraints.clear();
+    m_lKeyboards.clear();
+    m_lMice.clear();
+    m_lTablets.clear();
+    m_lTabletTools.clear();
+    m_lTabletPads.clear();
+    m_lIdleInhibitors.clear();
+    m_lTouchDevices.clear();
+    m_lSwitches.clear();
+}
+
 void CInputManager::onMouseMoved(wlr_pointer_motion_event* e) {
     static auto* const PSENS      = &g_pConfigManager->getConfigValuePtr("general:sensitivity")->floatValue;
     static auto* const PNOACCEL   = &g_pConfigManager->getConfigValuePtr("input:force_no_accel")->intValue;
@@ -112,7 +124,7 @@ void CInputManager::mouseMoveUnified(uint32_t time, bool refocus) {
     if (*PZOOMFACTOR != 1.f)
         g_pHyprRenderer->damageMonitor(PMONITOR);
 
-    if (!PMONITOR->solitaryClient && g_pHyprRenderer->shouldRenderCursor())
+    if (!PMONITOR->solitaryClient && g_pHyprRenderer->shouldRenderCursor() && PMONITOR->output->software_cursor_locks > 0)
         g_pCompositor->scheduleFrameForMonitor(PMONITOR);
 
     CWindow* forcedFocus = m_pForcedFocus;
@@ -221,10 +233,20 @@ void CInputManager::mouseMoveUnified(uint32_t time, bool refocus) {
         surfacePos   = PMONITOR->vecPosition;
     }
 
-    // overlay is above fullscreen
+    // overlays are above fullscreen
     if (!foundSurface)
         foundSurface = g_pCompositor->vectorToLayerSurface(mouseCoords, &PMONITOR->m_aLayerSurfaceLayers[ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY], &surfaceCoords, &pFoundLayerSurface);
 
+    // also IME popups
+    if (!foundSurface) {
+        auto popup = g_pCompositor->vectorToIMEPopup(mouseCoords, m_sIMERelay.m_lIMEPopups);
+        if (popup) {
+            foundSurface = popup->pSurface->surface;
+            surfacePos   = Vector2D(popup->realX, popup->realY);
+        }
+    }
+
+    // also top layers
     if (!foundSurface)
         foundSurface = g_pCompositor->vectorToLayerSurface(mouseCoords, &PMONITOR->m_aLayerSurfaceLayers[ZWLR_LAYER_SHELL_V1_LAYER_TOP], &surfaceCoords, &pFoundLayerSurface);
 
@@ -459,7 +481,6 @@ void CInputManager::onMouseButton(wlr_pointer_button_event* e) {
 }
 
 void CInputManager::processMouseRequest(wlr_seat_pointer_request_set_cursor_event* e) {
-
     if (!e->surface)
         g_pHyprRenderer->m_bWindowRequestedCursorHide = true;
     else
@@ -572,10 +593,13 @@ void CInputManager::setClickMode(eClickBehaviorMode mode) {
 void CInputManager::processMouseDownNormal(wlr_pointer_button_event* e) {
 
     // notify the keybind manager
-    static auto* const PPASSMOUSE      = &g_pConfigManager->getConfigValuePtr("binds:pass_mouse_when_bound")->intValue;
-    const auto         PASS            = g_pKeybindManager->onMouseEvent(e);
-    static auto* const PFOLLOWMOUSE    = &g_pConfigManager->getConfigValuePtr("input:follow_mouse")->intValue;
-    static auto* const PRESIZEONBORDER = &g_pConfigManager->getConfigValuePtr("general:resize_on_border")->intValue;
+    static auto* const PPASSMOUSE        = &g_pConfigManager->getConfigValuePtr("binds:pass_mouse_when_bound")->intValue;
+    const auto         PASS              = g_pKeybindManager->onMouseEvent(e);
+    static auto* const PFOLLOWMOUSE      = &g_pConfigManager->getConfigValuePtr("input:follow_mouse")->intValue;
+    static auto* const PRESIZEONBORDER   = &g_pConfigManager->getConfigValuePtr("general:resize_on_border")->intValue;
+    static auto* const PBORDERSIZE       = &g_pConfigManager->getConfigValuePtr("general:border_size")->intValue;
+    static auto* const PBORDERGRABEXTEND = &g_pConfigManager->getConfigValuePtr("general:extend_border_grab_area")->intValue;
+    const auto         BORDER_GRAB_AREA  = *PRESIZEONBORDER ? *PBORDERSIZE + *PBORDERGRABEXTEND : 0;
 
     if (!PASS && !*PPASSMOUSE)
         return;
@@ -588,7 +612,7 @@ void CInputManager::processMouseDownNormal(wlr_pointer_button_event* e) {
             if (!(wd->getDecorationFlags() & DECORATION_ALLOWS_MOUSE_INPUT))
                 continue;
 
-            if (wd->getWindowDecorationRegion().containsPoint(mouseCoords)) {
+            if (g_pDecorationPositioner->getWindowDecorationBox(wd.get()).containsPoint(mouseCoords)) {
                 wd->onMouseButtonOnDeco(mouseCoords, e);
                 return;
             }
@@ -600,7 +624,8 @@ void CInputManager::processMouseDownNormal(wlr_pointer_button_event* e) {
     if (*PRESIZEONBORDER && !m_bLastFocusOnLS) {
         if (w && !w->m_bIsFullscreen) {
             const CBox real = {w->m_vRealPosition.vec().x, w->m_vRealPosition.vec().y, w->m_vRealSize.vec().x, w->m_vRealSize.vec().y};
-            if ((!real.containsPoint(mouseCoords) || w->isInCurvedCorner(mouseCoords.x, mouseCoords.y)) && !w->hasPopupAt(mouseCoords)) {
+            const CBox grab = {real.x - BORDER_GRAB_AREA, real.y - BORDER_GRAB_AREA, real.width + 2 * BORDER_GRAB_AREA, real.height + 2 * BORDER_GRAB_AREA};
+            if ((grab.containsPoint(mouseCoords) && (!real.containsPoint(mouseCoords) || w->isInCurvedCorner(mouseCoords.x, mouseCoords.y))) && !w->hasPopupAt(mouseCoords)) {
                 g_pKeybindManager->resizeWithBorder(e);
                 return;
             }
@@ -667,15 +692,21 @@ void CInputManager::onMouseWheel(wlr_pointer_axis_event* e) {
 
     auto               factor = (*PSCROLLFACTOR <= 0.f || e->source != WLR_AXIS_SOURCE_FINGER ? 1.f : *PSCROLLFACTOR);
 
-    bool               passEvent = g_pKeybindManager->onAxisEvent(e);
+    const auto         EMAP = std::unordered_map<std::string, std::any>{{"event", e}};
+    EMIT_HOOK_EVENT_CANCELLABLE("mouseAxis", EMAP);
+
+    bool passEvent = g_pKeybindManager->onAxisEvent(e);
 
     g_pCompositor->notifyIdleActivity();
+
+    if (!passEvent)
+        return;
 
     const auto MOUSECOORDS = g_pInputManager->getMouseCoordsInternal();
     const auto pWindow     = g_pCompositor->vectorToWindowIdeal(MOUSECOORDS);
 
     if (*PGROUPBARSCROLLING && pWindow && !pWindow->m_bIsFullscreen && !pWindow->hasPopupAt(MOUSECOORDS) && pWindow->m_sGroupData.pNextWindow) {
-        const CBox box = pWindow->getDecorationByType(DECORATION_GROUPBAR)->getWindowDecorationRegion().getExtents();
+        const CBox box = g_pDecorationPositioner->getWindowDecorationBox(pWindow->getDecorationByType(DECORATION_GROUPBAR));
         if (box.containsPoint(MOUSECOORDS)) {
             if (e->delta > 0)
                 pWindow->setGroupCurrent(pWindow->m_sGroupData.pNextWindow);
@@ -685,8 +716,7 @@ void CInputManager::onMouseWheel(wlr_pointer_axis_event* e) {
         }
     }
 
-    if (passEvent)
-        wlr_seat_pointer_notify_axis(g_pCompositor->m_sSeat.seat, e->time_msec, e->orientation, factor * e->delta, std::round(factor * e->delta_discrete), e->source);
+    wlr_seat_pointer_notify_axis(g_pCompositor->m_sSeat.seat, e->time_msec, e->orientation, factor * e->delta, std::round(factor * e->delta_discrete), e->source);
 }
 
 Vector2D CInputManager::getMouseCoordsInternal() {
@@ -871,7 +901,7 @@ void CInputManager::applyConfigToKeyboard(SKeyboard* pKeyboard) {
         pKeyboard->currentRules.model   = "";
         pKeyboard->currentRules.variant = "";
         pKeyboard->currentRules.options = "";
-        pKeyboard->currentRules.layout  = "";
+        pKeyboard->currentRules.layout  = "us";
 
         KEYMAP = xkb_keymap_new_from_names(CONTEXT, &rules, XKB_KEYMAP_COMPILE_NO_FLAGS);
     }
@@ -1053,7 +1083,7 @@ void CInputManager::setPointerConfigs() {
 
                     const auto CONFIG = libinput_config_accel_create(LIBINPUT_CONFIG_ACCEL_PROFILE_CUSTOM);
                     libinput_config_accel_set_points(CONFIG, LIBINPUT_ACCEL_TYPE_MOTION, step, points.size(), points.data());
-                    libinput_device_config_accel_set_profile(LIBINPUTDEV, LIBINPUT_CONFIG_ACCEL_PROFILE_CUSTOM);
+                    libinput_device_config_accel_apply(LIBINPUTDEV, CONFIG);
                     libinput_config_accel_destroy(CONFIG);
                 } catch (std::exception& e) { Debug::log(ERR, "Invalid values in custom accel profile"); }
             } else {
@@ -1130,6 +1160,9 @@ void CInputManager::updateKeyboardsLeds(wlr_input_device* pKeyboard) {
 void CInputManager::onKeyboardKey(wlr_keyboard_key_event* e, SKeyboard* pKeyboard) {
     if (!pKeyboard->enabled)
         return;
+
+    const auto EMAP = std::unordered_map<std::string, std::any>{{"keyboard", pKeyboard}, {"event", e}};
+    EMIT_HOOK_EVENT_CANCELLABLE("keyPress", EMAP);
 
     static auto* const PDPMS = &g_pConfigManager->getConfigValuePtr("misc:key_press_enables_dpms")->intValue;
     if (*PDPMS && !g_pCompositor->m_bDPMSStateON) {
@@ -1638,7 +1671,7 @@ void CInputManager::setCursorIconOnBorder(CWindow* w) {
             if (!(wd->getDecorationFlags() & DECORATION_ALLOWS_MOUSE_INPUT))
                 continue;
 
-            if (wd->getWindowDecorationRegion().containsPoint(mouseCoords)) {
+            if (g_pDecorationPositioner->getWindowDecorationBox(wd.get()).containsPoint(mouseCoords)) {
                 onDeco = true;
                 break;
             }

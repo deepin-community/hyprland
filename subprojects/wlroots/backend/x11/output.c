@@ -21,17 +21,13 @@
 #include <wlr/util/log.h>
 
 #include "backend/x11.h"
+#include "util/signal.h"
 #include "util/time.h"
-#include "types/wlr_output.h"
 
 static const uint32_t SUPPORTED_OUTPUT_STATE =
 	WLR_OUTPUT_STATE_BACKEND_OPTIONAL |
 	WLR_OUTPUT_STATE_BUFFER |
-	WLR_OUTPUT_STATE_ENABLED |
-	WLR_OUTPUT_STATE_MODE |
-	WLR_OUTPUT_STATE_ADAPTIVE_SYNC_ENABLED;
-
-static size_t last_output_num = 0;
+	WLR_OUTPUT_STATE_MODE;
 
 static void parse_xcb_setup(struct wlr_output *output,
 		xcb_connection_t *xcb) {
@@ -55,8 +51,7 @@ static void parse_xcb_setup(struct wlr_output *output,
 static struct wlr_x11_output *get_x11_output_from_output(
 		struct wlr_output *wlr_output) {
 	assert(wlr_output_is_x11(wlr_output));
-	struct wlr_x11_output *output = wl_container_of(wlr_output, output, wlr_output);
-	return output;
+	return (struct wlr_x11_output *)wlr_output;
 }
 
 static bool output_set_custom_mode(struct wlr_output *wlr_output,
@@ -76,9 +71,6 @@ static bool output_set_custom_mode(struct wlr_output *wlr_output,
 		free(error);
 		return false;
 	}
-
-	// Move the pointer to its new location
-	update_x11_pointer_position(output, output->x11->time);
 
 	return true;
 }
@@ -121,25 +113,8 @@ static bool output_test(struct wlr_output *wlr_output,
 		return false;
 	}
 
-	// All we can do to influence adaptive sync on the X11 backend is set the
-	// _VARIABLE_REFRESH window property like mesa automatically does. We don't
-	// have any control beyond that, so we set the state to enabled on creating
-	// the output and never allow changing it (just like the Wayland backend).
-	assert(wlr_output->adaptive_sync_status == WLR_OUTPUT_ADAPTIVE_SYNC_ENABLED);
-	if (state->committed & WLR_OUTPUT_STATE_ADAPTIVE_SYNC_ENABLED) {
-		if (!state->adaptive_sync_enabled) {
-			wlr_log(WLR_DEBUG, "Disabling adaptive sync is not supported");
-			return false;
-		}
-	}
-
 	if (state->committed & WLR_OUTPUT_STATE_MODE) {
 		assert(state->mode_type == WLR_OUTPUT_STATE_MODE_CUSTOM);
-
-		if (state->custom_mode.refresh != 0) {
-			wlr_log(WLR_DEBUG, "Refresh rates are not supported");
-			return false;
-		}
 	}
 
 	return true;
@@ -152,9 +127,6 @@ static void destroy_x11_buffer(struct wlr_x11_buffer *buffer) {
 	wl_list_remove(&buffer->buffer_destroy.link);
 	wl_list_remove(&buffer->link);
 	xcb_free_pixmap(buffer->x11->xcb, buffer->pixmap);
-	for (size_t i = 0; i < buffer->n_busy; i++) {
-		wlr_buffer_unlock(buffer->buffer);
-	}
 	free(buffer);
 }
 
@@ -256,13 +228,12 @@ static struct wlr_x11_buffer *create_x11_buffer(struct wlr_x11_output *output,
 		return NULL;
 	}
 
-	struct wlr_x11_buffer *buffer = calloc(1, sizeof(*buffer));
+	struct wlr_x11_buffer *buffer = calloc(1, sizeof(struct wlr_x11_buffer));
 	if (!buffer) {
 		xcb_free_pixmap(x11->xcb, pixmap);
 		return NULL;
 	}
 	buffer->buffer = wlr_buffer_lock(wlr_buffer);
-	buffer->n_busy = 1;
 	buffer->pixmap = pixmap;
 	buffer->x11 = x11;
 	wl_list_insert(&output->buffers, &buffer->link);
@@ -279,7 +250,6 @@ static struct wlr_x11_buffer *get_or_create_x11_buffer(
 	wl_list_for_each(buffer, &output->buffers, link) {
 		if (buffer->buffer == wlr_buffer) {
 			wlr_buffer_lock(buffer->buffer);
-			buffer->n_busy++;
 			return buffer;
 		}
 	}
@@ -300,10 +270,11 @@ static bool output_commit_buffer(struct wlr_x11_output *output,
 
 	xcb_xfixes_region_t region = XCB_NONE;
 	if (state->committed & WLR_OUTPUT_STATE_DAMAGE) {
-		pixman_region32_union(&output->exposed, &output->exposed, &state->damage);
+		pixman_region32_union(&output->exposed, &output->exposed,
+			(pixman_region32_t *) &state->damage);
 
 		int rects_len = 0;
-		const pixman_box32_t *rects = pixman_region32_rectangles(&output->exposed, &rects_len);
+		pixman_box32_t *rects = pixman_region32_rectangles(&output->exposed, &rects_len);
 
 		xcb_rectangle_t *xcb_rects = calloc(rects_len, sizeof(xcb_rectangle_t));
 		if (!xcb_rects) {
@@ -311,7 +282,7 @@ static bool output_commit_buffer(struct wlr_x11_output *output,
 		}
 
 		for (int i = 0; i < rects_len; i++) {
-			const pixman_box32_t *box = &rects[i];
+			pixman_box32_t *box = &rects[i];
 			xcb_rects[i] = (struct xcb_rectangle_t){
 				.x = box->x1,
 				.y = box->y1,
@@ -355,14 +326,6 @@ static bool output_commit(struct wlr_output *wlr_output,
 		return false;
 	}
 
-	if (state->committed & WLR_OUTPUT_STATE_ENABLED) {
-		if (state->enabled) {
-			xcb_map_window(x11->xcb, output->win);
-		} else {
-			xcb_unmap_window(x11->xcb, output->win);
-		}
-	}
-
 	if (state->committed & WLR_OUTPUT_STATE_MODE) {
 		if (!output_set_custom_mode(wlr_output,
 				state->custom_mode.width,
@@ -372,14 +335,25 @@ static bool output_commit(struct wlr_output *wlr_output,
 		}
 	}
 
+	if (state->committed & WLR_OUTPUT_STATE_ADAPTIVE_SYNC_ENABLED &&
+			x11->atoms.variable_refresh != XCB_ATOM_NONE) {
+		if (state->adaptive_sync_enabled) {
+			uint32_t enabled = 1;
+			xcb_change_property(x11->xcb, XCB_PROP_MODE_REPLACE, output->win,
+				x11->atoms.variable_refresh, XCB_ATOM_CARDINAL, 32, 1,
+				&enabled);
+			wlr_output->adaptive_sync_status = WLR_OUTPUT_ADAPTIVE_SYNC_UNKNOWN;
+		} else {
+			xcb_delete_property(x11->xcb, output->win,
+				x11->atoms.variable_refresh);
+			wlr_output->adaptive_sync_status = WLR_OUTPUT_ADAPTIVE_SYNC_DISABLED;
+		}
+	}
+
 	if (state->committed & WLR_OUTPUT_STATE_BUFFER) {
 		if (!output_commit_buffer(output, state)) {
 			return false;
 		}
-	} else if (output_pending_enabled(wlr_output, state)) {
-		uint32_t serial = output->wlr_output.commit_seq;
-		uint64_t target_msc = output->last_msc ? output->last_msc + 1 : 0;
-		xcb_present_notify_msc(x11->xcb, output->win, serial, target_msc, 0, 0);
 	}
 
 	xcb_flush(x11->xcb);
@@ -437,7 +411,7 @@ static bool output_cursor_to_picture(struct wlr_x11_output *output,
 	}
 
 	bool result = wlr_renderer_read_pixels(
-		renderer, DRM_FORMAT_ARGB8888,
+		renderer, DRM_FORMAT_ARGB8888, NULL,
 		stride, buffer->width, buffer->height, 0, 0, 0, 0,
 		data);
 
@@ -535,7 +509,7 @@ struct wlr_output *wlr_x11_output_create(struct wlr_backend *backend) {
 		return NULL;
 	}
 
-	struct wlr_x11_output *output = calloc(1, sizeof(*output));
+	struct wlr_x11_output *output = calloc(1, sizeof(struct wlr_x11_output));
 	if (output == NULL) {
 		return NULL;
 	}
@@ -544,24 +518,19 @@ struct wlr_output *wlr_x11_output_create(struct wlr_backend *backend) {
 	pixman_region32_init(&output->exposed);
 
 	struct wlr_output *wlr_output = &output->wlr_output;
+	wlr_output_init(wlr_output, &x11->backend, &output_impl, x11->wl_display);
 
-	struct wlr_output_state state;
-	wlr_output_state_init(&state);
-	wlr_output_state_set_custom_mode(&state, 1024, 768, 0);
-
-	wlr_output_init(wlr_output, &x11->backend, &output_impl, x11->wl_display, &state);
-	wlr_output_state_finish(&state);
-
-	size_t output_num = ++last_output_num;
+	wlr_output_update_custom_mode(wlr_output, 1024, 768, 0);
 
 	char name[64];
-	snprintf(name, sizeof(name), "X11-%zu", output_num);
+	snprintf(name, sizeof(name), "X11-%zu", ++x11->last_output_num);
 	wlr_output_set_name(wlr_output, name);
 
 	parse_xcb_setup(wlr_output, x11->xcb);
 
 	char description[128];
-	snprintf(description, sizeof(description), "X11 output %zu", output_num);
+	snprintf(description, sizeof(description),
+		"X11 output %zu", x11->last_output_num);
 	wlr_output_set_description(wlr_output, description);
 
 	// The X11 protocol requires us to set a colormap and border pixel if the
@@ -605,17 +574,14 @@ struct wlr_output *wlr_x11_output_create(struct wlr_backend *backend) {
 		x11->atoms.wm_protocols, XCB_ATOM_ATOM, 32, 1,
 		&x11->atoms.wm_delete_window);
 
-	uint32_t enabled = 1;
-	xcb_change_property(x11->xcb, XCB_PROP_MODE_REPLACE, output->win,
-		x11->atoms.variable_refresh, XCB_ATOM_CARDINAL, 32, 1,
-		&enabled);
-	wlr_output->adaptive_sync_status = WLR_OUTPUT_ADAPTIVE_SYNC_ENABLED;
-
 	wlr_x11_output_set_title(wlr_output, NULL);
 
+	xcb_map_window(x11->xcb, output->win);
 	xcb_flush(x11->xcb);
 
 	wl_list_insert(&x11->outputs, &output->link);
+
+	wlr_output_update_enabled(wlr_output, true);
 
 	wlr_pointer_init(&output->pointer, &x11_pointer_impl, "x11-pointer");
 	output->pointer.output_name = strdup(wlr_output->name);
@@ -624,15 +590,19 @@ struct wlr_output *wlr_x11_output_create(struct wlr_backend *backend) {
 	output->touch.output_name = strdup(wlr_output->name);
 	wl_list_init(&output->touchpoints);
 
-	wl_signal_emit_mutable(&x11->backend.events.new_output, wlr_output);
-	wl_signal_emit_mutable(&x11->backend.events.new_input, &output->pointer.base);
-	wl_signal_emit_mutable(&x11->backend.events.new_input, &output->touch.base);
+	wlr_signal_emit_safe(&x11->backend.events.new_output, wlr_output);
+	wlr_signal_emit_safe(&x11->backend.events.new_input, &output->pointer.base);
+	wlr_signal_emit_safe(&x11->backend.events.new_input, &output->touch.base);
+
+	// Start the rendering loop by requesting the compositor to render a frame
+	wlr_output_schedule_frame(wlr_output);
 
 	return wlr_output;
 }
 
 void handle_x11_configure_notify(struct wlr_x11_output *output,
 		xcb_configure_notify_event_t *ev) {
+	// ignore events that set an invalid size:
 	if (ev->width == 0 || ev->height == 0) {
 		wlr_log(WLR_DEBUG,
 			"Ignoring X11 configure event for height=%d, width=%d",
@@ -640,11 +610,11 @@ void handle_x11_configure_notify(struct wlr_x11_output *output,
 		return;
 	}
 
-	struct wlr_output_state state;
-	wlr_output_state_init(&state);
-	wlr_output_state_set_custom_mode(&state, ev->width, ev->height, 0);
-	wlr_output_send_request_state(&output->wlr_output, &state);
-	wlr_output_state_finish(&state);
+	wlr_output_update_custom_mode(&output->wlr_output, ev->width,
+		ev->height, 0);
+
+	// Move the pointer to its new location
+	update_x11_pointer_position(output, output->x11->time);
 }
 
 bool wlr_output_is_x11(struct wlr_output *wlr_output) {
@@ -700,8 +670,6 @@ void handle_x11_present_event(struct wlr_x11_backend *x11,
 			return;
 		}
 
-		assert(buffer->n_busy > 0);
-		buffer->n_busy--;
 		wlr_buffer_unlock(buffer->buffer); // may destroy buffer
 		break;
 	case XCB_PRESENT_COMPLETE_NOTIFY:;

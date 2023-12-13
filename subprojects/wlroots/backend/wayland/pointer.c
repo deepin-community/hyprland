@@ -7,6 +7,7 @@
 #include <wlr/util/log.h>
 
 #include "backend/wayland.h"
+#include "util/signal.h"
 
 #include "pointer-gestures-unstable-v1-client-protocol.h"
 #include "relative-pointer-unstable-v1-client-protocol.h"
@@ -38,10 +39,8 @@ static void pointer_handle_enter(void *data, struct wl_pointer *wl_pointer,
 		return;
 	}
 
-	struct wlr_wl_output *output = get_wl_output_from_surface(seat->backend, surface);
-	if (output == NULL) {
-		return;
-	}
+	struct wlr_wl_output *output = wl_surface_get_user_data(surface);
+	assert(output);
 
 	struct wlr_wl_pointer *pointer = output_get_pointer(output, wl_pointer);
 	seat->active_pointer = pointer;
@@ -66,10 +65,8 @@ static void pointer_handle_leave(void *data, struct wl_pointer *wl_pointer,
 		return;
 	}
 
-	struct wlr_wl_output *output = get_wl_output_from_surface(seat->backend, surface);
-	if (output == NULL) {
-		return;
-	}
+	struct wlr_wl_output *output = wl_surface_get_user_data(surface);
+	assert(output);
 
 	if (seat->active_pointer != NULL &&
 			seat->active_pointer->output == output) {
@@ -97,7 +94,7 @@ static void pointer_handle_motion(void *data, struct wl_pointer *wl_pointer,
 		.x = wl_fixed_to_double(sx) / wlr_output->width,
 		.y = wl_fixed_to_double(sy) / wlr_output->height,
 	};
-	wl_signal_emit_mutable(&pointer->wlr_pointer.events.motion_absolute, &event);
+	wlr_signal_emit_safe(&pointer->wlr_pointer.events.motion_absolute, &event);
 }
 
 static void pointer_handle_button(void *data, struct wl_pointer *wl_pointer,
@@ -114,7 +111,7 @@ static void pointer_handle_button(void *data, struct wl_pointer *wl_pointer,
 		.state = state,
 		.time_msec = time,
 	};
-	wl_signal_emit_mutable(&pointer->wlr_pointer.events.button, &event);
+	wlr_signal_emit_safe(&pointer->wlr_pointer.events.button, &event);
 }
 
 static void pointer_handle_axis(void *data, struct wl_pointer *wl_pointer,
@@ -133,7 +130,7 @@ static void pointer_handle_axis(void *data, struct wl_pointer *wl_pointer,
 		.time_msec = time,
 		.source = pointer->axis_source,
 	};
-	wl_signal_emit_mutable(&pointer->wlr_pointer.events.axis, &event);
+	wlr_signal_emit_safe(&pointer->wlr_pointer.events.axis, &event);
 
 	pointer->axis_discrete = 0;
 }
@@ -145,7 +142,7 @@ static void pointer_handle_frame(void *data, struct wl_pointer *wl_pointer) {
 		return;
 	}
 
-	wl_signal_emit_mutable(&pointer->wlr_pointer.events.frame,
+	wlr_signal_emit_safe(&pointer->wlr_pointer.events.frame,
 		&pointer->wlr_pointer);
 }
 
@@ -176,7 +173,7 @@ static void pointer_handle_axis_stop(void *data, struct wl_pointer *wl_pointer,
 		.time_msec = time,
 		.source = pointer->axis_source,
 	};
-	wl_signal_emit_mutable(&pointer->wlr_pointer.events.axis, &event);
+	wlr_signal_emit_safe(&pointer->wlr_pointer.events.axis, &event);
 }
 
 static void pointer_handle_axis_discrete(void *data,
@@ -231,7 +228,7 @@ static void gesture_swipe_begin(void *data,
 		.time_msec = time,
 		.fingers = fingers,
 	};
-	wl_signal_emit_mutable(&pointer->wlr_pointer.events.swipe_begin, &wlr_event);
+	wlr_signal_emit_safe(&pointer->wlr_pointer.events.swipe_begin, &wlr_event);
 }
 
 static void gesture_swipe_update(void *data,
@@ -250,7 +247,7 @@ static void gesture_swipe_update(void *data,
 		.dx = wl_fixed_to_double(dx),
 		.dy = wl_fixed_to_double(dy),
 	};
-	wl_signal_emit_mutable(&pointer->wlr_pointer.events.swipe_update, &wlr_event);
+	wlr_signal_emit_safe(&pointer->wlr_pointer.events.swipe_update, &wlr_event);
 }
 
 static void gesture_swipe_end(void *data,
@@ -267,7 +264,7 @@ static void gesture_swipe_end(void *data,
 		.time_msec = time,
 		.cancelled = cancelled,
 	};
-	wl_signal_emit_mutable(&pointer->wlr_pointer.events.swipe_end, &wlr_event);
+	wlr_signal_emit_safe(&pointer->wlr_pointer.events.swipe_end, &wlr_event);
 }
 
 static const struct zwp_pointer_gesture_swipe_v1_listener gesture_swipe_impl = {
@@ -294,7 +291,7 @@ static void gesture_pinch_begin(void *data,
 		.fingers = pointer->fingers,
 	};
 
-	wl_signal_emit_mutable(&pointer->wlr_pointer.events.pinch_begin, &wlr_event);
+	wlr_signal_emit_safe(&pointer->wlr_pointer.events.pinch_begin, &wlr_event);
 }
 
 static void gesture_pinch_update(void *data,
@@ -316,7 +313,7 @@ static void gesture_pinch_update(void *data,
 		.scale = wl_fixed_to_double(scale),
 		.rotation = wl_fixed_to_double(rotation),
 	};
-	wl_signal_emit_mutable(&pointer->wlr_pointer.events.pinch_update, &wlr_event);
+	wlr_signal_emit_safe(&pointer->wlr_pointer.events.pinch_update, &wlr_event);
 }
 
 static void gesture_pinch_end(void *data,
@@ -333,7 +330,7 @@ static void gesture_pinch_end(void *data,
 		.time_msec = time,
 		.cancelled = cancelled,
 	};
-	wl_signal_emit_mutable(&pointer->wlr_pointer.events.pinch_end, &wlr_event);
+	wlr_signal_emit_safe(&pointer->wlr_pointer.events.pinch_end, &wlr_event);
 }
 
 static const struct zwp_pointer_gesture_pinch_v1_listener gesture_pinch_impl = {
@@ -359,7 +356,7 @@ static void gesture_hold_begin(void *data,
 		.time_msec = time,
 		.fingers = fingers,
 	};
-	wl_signal_emit_mutable(&pointer->wlr_pointer.events.hold_begin, &wlr_event);
+	wlr_signal_emit_safe(&pointer->wlr_pointer.events.hold_begin, &wlr_event);
 }
 
 static void gesture_hold_end(void *data,
@@ -376,7 +373,7 @@ static void gesture_hold_end(void *data,
 		.time_msec = time,
 		.cancelled = cancelled,
 	};
-	wl_signal_emit_mutable(&pointer->wlr_pointer.events.hold_end, &wlr_event);
+	wlr_signal_emit_safe(&pointer->wlr_pointer.events.hold_end, &wlr_event);
 }
 
 static const struct zwp_pointer_gesture_hold_v1_listener gesture_hold_impl = {
@@ -404,7 +401,7 @@ static void relative_pointer_handle_relative_motion(void *data,
 		.unaccel_dx = wl_fixed_to_double(dx_unaccel),
 		.unaccel_dy = wl_fixed_to_double(dy_unaccel),
 	};
-	wl_signal_emit_mutable(&pointer->wlr_pointer.events.motion, &wlr_event);
+	wlr_signal_emit_safe(&pointer->wlr_pointer.events.motion, &wlr_event);
 }
 
 static const struct zwp_relative_pointer_v1_listener relative_pointer_listener = {
@@ -448,7 +445,7 @@ void create_pointer(struct wlr_wl_seat *seat, struct wlr_wl_output *output) {
 	wlr_log(WLR_DEBUG, "creating pointer for output '%s' from seat '%s'",
 		output->wlr_output.name, seat->name);
 
-	struct wlr_wl_pointer *pointer = calloc(1, sizeof(*pointer));
+	struct wlr_wl_pointer *pointer = calloc(1, sizeof(struct wlr_wl_pointer));
 	if (pointer == NULL) {
 		wlr_log(WLR_ERROR, "failed to allocate wlr_wl_pointer");
 		return;
@@ -466,7 +463,7 @@ void create_pointer(struct wlr_wl_seat *seat, struct wlr_wl_output *output) {
 	wl_signal_add(&output->wlr_output.events.destroy, &pointer->output_destroy);
 	pointer->output_destroy.notify = pointer_output_destroy;
 
-	wl_signal_emit_mutable(&seat->backend->backend.events.new_input,
+	wlr_signal_emit_safe(&seat->backend->backend.events.new_input,
 		&pointer->wlr_pointer.base);
 
 	wl_list_insert(&seat->pointers, &pointer->link);

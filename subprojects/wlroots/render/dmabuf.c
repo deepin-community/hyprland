@@ -3,7 +3,6 @@
 #include <unistd.h>
 #include <wlr/render/dmabuf.h>
 #include <wlr/util/log.h>
-#include "render/dmabuf.h"
 
 void wlr_dmabuf_attributes_finish(struct wlr_dmabuf_attributes *attribs) {
 	for (int i = 0; i < attribs->n_planes; ++i) {
@@ -15,7 +14,7 @@ void wlr_dmabuf_attributes_finish(struct wlr_dmabuf_attributes *attribs) {
 
 bool wlr_dmabuf_attributes_copy(struct wlr_dmabuf_attributes *dst,
 		const struct wlr_dmabuf_attributes *src) {
-	*dst = *src;
+	memcpy(dst, src, sizeof(struct wlr_dmabuf_attributes));
 
 	int i;
 	for (i = 0; i < src->n_planes; ++i) {

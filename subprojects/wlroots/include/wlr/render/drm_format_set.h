@@ -1,11 +1,3 @@
-/*
- * This an unstable interface of wlroots. No guarantees are made regarding the
- * future consistency of this API.
- */
-#ifndef WLR_USE_UNSTABLE
-#error "Add -DWLR_USE_UNSTABLE to enable unstable wlroots features"
-#endif
-
 #ifndef WLR_RENDER_DRM_FORMAT_SET_H
 #define WLR_RENDER_DRM_FORMAT_SET_H
 
@@ -22,13 +14,8 @@ struct wlr_drm_format {
 	// The capacity of the array; do not use.
 	size_t capacity;
 	// The actual modifiers
-	uint64_t *modifiers;
+	uint64_t modifiers[];
 };
-
-/**
- * Free all resources allocated to this DRM format.
- */
-void wlr_drm_format_finish(struct wlr_drm_format *format);
 
 /**
  * A set of DRM formats and modifiers.
@@ -37,7 +24,7 @@ void wlr_drm_format_finish(struct wlr_drm_format *format);
  * instance, backends will report the set they can display, and renderers will
  * report the set they can render to. For a more general overview of formats
  * and modifiers, see:
- * https://www.kernel.org/doc/html/next/userspace-api/dma-buf-alloc-exchange.html#formats-and-modifiers
+ * https://lore.kernel.org/dri-devel/20210905122742.86029-1-daniels@collabora.com/
  *
  * For compatibility with legacy drivers which don't support explicit
  * modifiers, the special modifier DRM_FORMAT_MOD_INVALID is used to indicate
@@ -54,11 +41,12 @@ struct wlr_drm_format_set {
 	// The capacity of the array; private to wlroots
 	size_t capacity;
 	// A pointer to an array of `struct wlr_drm_format *` of length `len`.
-	struct wlr_drm_format *formats;
+	struct wlr_drm_format **formats;
 };
 
 /**
- * Free all of the DRM formats in the set, making the set empty.
+ * Free all of the DRM formats in the set, making the set empty.  Does not
+ * free the set itself.
  */
 void wlr_drm_format_set_finish(struct wlr_drm_format_set *set);
 
@@ -77,21 +65,11 @@ bool wlr_drm_format_set_add(struct wlr_drm_format_set *set, uint32_t format,
 
 /**
  * Intersect two DRM format sets `a` and `b`, storing in the destination set
- * `dst` the format + modifier pairs which are in both source sets. The `dst`
- * must either be zeroed or initialized with other state to be replaced.
+ * `dst` the format + modifier pairs which are in both source sets.
  *
  * Returns false on failure or when the intersection is empty.
  */
 bool wlr_drm_format_set_intersect(struct wlr_drm_format_set *dst,
 	const struct wlr_drm_format_set *a, const struct wlr_drm_format_set *b);
 
-/**
- * Unions DRM format set `a` and `b`, storing in the destination set
- * `dst`. The `dst` must either be zeroed or initialized with other state
- * to be replaced.
- *
- * Returns false on failure.
- */
-bool wlr_drm_format_set_union(struct wlr_drm_format_set *dst,
-	const struct wlr_drm_format_set *a, const struct wlr_drm_format_set *b);
 #endif

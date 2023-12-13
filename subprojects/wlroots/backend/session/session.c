@@ -9,6 +9,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <time.h>
 #include <wayland-server-core.h>
 #include <wlr/backend/session.h>
 #include <wlr/config.h>
@@ -16,7 +17,7 @@
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 #include "backend/session/session.h"
-#include "util/time.h"
+#include "util/signal.h"
 
 #include <libseat.h>
 
@@ -25,13 +26,13 @@
 static void handle_enable_seat(struct libseat *seat, void *data) {
 	struct wlr_session *session = data;
 	session->active = true;
-	wl_signal_emit_mutable(&session->events.active, NULL);
+	wlr_signal_emit_safe(&session->events.active, NULL);
 }
 
 static void handle_disable_seat(struct libseat *seat, void *data) {
 	struct wlr_session *session = data;
 	session->active = false;
-	wl_signal_emit_mutable(&session->events.active, NULL);
+	wlr_signal_emit_safe(&session->events.active, NULL);
 	libseat_disable_seat(session->seat_handle);
 }
 
@@ -197,7 +198,7 @@ static int handle_udev_event(int fd, uint32_t mask, void *data) {
 		struct wlr_session_add_event event = {
 			.path = devnode,
 		};
-		wl_signal_emit_mutable(&session->events.add_drm_card, &event);
+		wlr_signal_emit_safe(&session->events.add_drm_card, &event);
 	} else if (strcmp(action, "change") == 0 || strcmp(action, "remove") == 0) {
 		dev_t devnum = udev_device_get_devnum(udev_dev);
 		struct wlr_device *dev;
@@ -210,10 +211,10 @@ static int handle_udev_event(int fd, uint32_t mask, void *data) {
 				wlr_log(WLR_DEBUG, "DRM device %s changed", sysname);
 				struct wlr_device_change_event event = {0};
 				read_udev_change_event(&event, udev_dev);
-				wl_signal_emit_mutable(&dev->events.change, &event);
+				wlr_signal_emit_safe(&dev->events.change, &event);
 			} else if (strcmp(action, "remove") == 0) {
 				wlr_log(WLR_DEBUG, "DRM device %s removed", sysname);
-				wl_signal_emit_mutable(&dev->events.remove, NULL);
+				wlr_signal_emit_safe(&dev->events.remove, NULL);
 			} else {
 				assert(0);
 			}
@@ -297,7 +298,7 @@ void wlr_session_destroy(struct wlr_session *session) {
 		return;
 	}
 
-	wl_signal_emit_mutable(&session->events.destroy, session);
+	wlr_signal_emit_safe(&session->events.destroy, session);
 	wl_list_remove(&session->display_destroy.link);
 
 	wl_event_source_remove(session->udev_event);
@@ -436,6 +437,12 @@ static struct udev_enumerate *enumerate_drm_cards(struct udev *udev) {
 	return en;
 }
 
+static uint64_t get_current_time_ms(void) {
+	struct timespec ts = {0};
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+}
+
 struct find_gpus_add_handler {
 	bool added;
 	struct wl_listener listener;
@@ -470,8 +477,8 @@ ssize_t wlr_session_find_gpus(struct wlr_session *session,
 		handler.listener.notify = find_gpus_handle_add;
 		wl_signal_add(&session->events.add_drm_card, &handler.listener);
 
-		int64_t started_at = get_current_time_msec();
-		int64_t timeout = WAIT_GPU_TIMEOUT;
+		uint64_t started_at = get_current_time_ms();
+		uint64_t timeout = WAIT_GPU_TIMEOUT;
 		struct wl_event_loop *event_loop =
 			wl_display_get_event_loop(session->display);
 		while (!handler.added) {
@@ -483,7 +490,7 @@ ssize_t wlr_session_find_gpus(struct wlr_session *session,
 				return -1;
 			}
 
-			int64_t now = get_current_time_msec();
+			uint64_t now = get_current_time_ms();
 			if (now >= started_at + WAIT_GPU_TIMEOUT) {
 				break;
 			}

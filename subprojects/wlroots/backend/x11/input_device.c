@@ -16,6 +16,7 @@
 #include <wlr/util/log.h>
 
 #include "backend/x11.h"
+#include "util/signal.h"
 
 static void send_key_event(struct wlr_x11_backend *x11, uint32_t key,
 		enum wl_keyboard_key_state st, xcb_timestamp_t time) {
@@ -36,8 +37,8 @@ static void send_button_event(struct wlr_x11_output *output, uint32_t key,
 		.button = key,
 		.state = st,
 	};
-	wl_signal_emit_mutable(&output->pointer.events.button, &ev);
-	wl_signal_emit_mutable(&output->pointer.events.frame, &output->pointer);
+	wlr_signal_emit_safe(&output->pointer.events.button, &ev);
+	wlr_signal_emit_safe(&output->pointer.events.frame, &output->pointer);
 }
 
 static void send_axis_event(struct wlr_x11_output *output, int32_t delta,
@@ -47,12 +48,12 @@ static void send_axis_event(struct wlr_x11_output *output, int32_t delta,
 		.time_msec = time,
 		.source = WLR_AXIS_SOURCE_WHEEL,
 		.orientation = WLR_AXIS_ORIENTATION_VERTICAL,
-		// Most mice use a 15 degree angle per scroll click
+		// 15 is a typical value libinput sends for one scroll
 		.delta = delta * 15,
-		.delta_discrete = delta * WLR_POINTER_AXIS_DISCRETE_STEP,
+		.delta_discrete = delta,
 	};
-	wl_signal_emit_mutable(&output->pointer.events.axis, &ev);
-	wl_signal_emit_mutable(&output->pointer.events.frame, &output->pointer);
+	wlr_signal_emit_safe(&output->pointer.events.axis, &ev);
+	wlr_signal_emit_safe(&output->pointer.events.frame, &output->pointer);
 }
 
 static void send_pointer_position_event(struct wlr_x11_output *output,
@@ -63,8 +64,8 @@ static void send_pointer_position_event(struct wlr_x11_output *output,
 		.x = (double)x / output->wlr_output.width,
 		.y = (double)y / output->wlr_output.height,
 	};
-	wl_signal_emit_mutable(&output->pointer.events.motion_absolute, &ev);
-	wl_signal_emit_mutable(&output->pointer.events.frame, &output->pointer);
+	wlr_signal_emit_safe(&output->pointer.events.motion_absolute, &ev);
+	wlr_signal_emit_safe(&output->pointer.events.frame, &output->pointer);
 }
 
 static void send_touch_down_event(struct wlr_x11_output *output,
@@ -76,8 +77,8 @@ static void send_touch_down_event(struct wlr_x11_output *output,
 		.y = (double)y / output->wlr_output.height,
 		.touch_id = touch_id,
 	};
-	wl_signal_emit_mutable(&output->touch.events.down, &ev);
-	wl_signal_emit_mutable(&output->touch.events.frame, NULL);
+	wlr_signal_emit_safe(&output->touch.events.down, &ev);
+	wlr_signal_emit_safe(&output->touch.events.frame, NULL);
 }
 
 static void send_touch_motion_event(struct wlr_x11_output *output,
@@ -89,8 +90,8 @@ static void send_touch_motion_event(struct wlr_x11_output *output,
 		.y = (double)y / output->wlr_output.height,
 		.touch_id = touch_id,
 	};
-	wl_signal_emit_mutable(&output->touch.events.motion, &ev);
-	wl_signal_emit_mutable(&output->touch.events.frame, NULL);
+	wlr_signal_emit_safe(&output->touch.events.motion, &ev);
+	wlr_signal_emit_safe(&output->touch.events.frame, NULL);
 }
 
 static void send_touch_up_event(struct wlr_x11_output *output,
@@ -100,8 +101,8 @@ static void send_touch_up_event(struct wlr_x11_output *output,
 		.time_msec = time,
 		.touch_id = touch_id,
 	};
-	wl_signal_emit_mutable(&output->touch.events.up, &ev);
-	wl_signal_emit_mutable(&output->touch.events.frame, NULL);
+	wlr_signal_emit_safe(&output->touch.events.up, &ev);
+	wlr_signal_emit_safe(&output->touch.events.frame, NULL);
 }
 
 static struct wlr_x11_touchpoint *get_touchpoint_from_x11_touch_id(
@@ -232,7 +233,7 @@ void handle_x11_xinput_event(struct wlr_x11_backend *x11,
 			id = last_touchpoint->wayland_id + 1;
 		}
 
-		struct wlr_x11_touchpoint *touchpoint = calloc(1, sizeof(*touchpoint));
+		struct wlr_x11_touchpoint *touchpoint = calloc(1, sizeof(struct wlr_x11_touchpoint));
 		touchpoint->x11_id = ev->detail;
 		touchpoint->wayland_id = id;
 		wl_list_init(&touchpoint->link);

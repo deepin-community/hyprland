@@ -50,6 +50,10 @@ void CMonitor::onConnect(bool noRule) {
 
     szName = output->name;
 
+    szDescription = output->description ? output->description : "";
+    // remove comma character from description. This allow monitor specific rules to work on monitor with comma on their description
+    szDescription.erase(std::remove(szDescription.begin(), szDescription.end(), ','), szDescription.end());
+
     if (!wlr_backend_is_drm(output->backend))
         createdByUser = true; // should be true. WL, X11 and Headless backends should be addable / removable
 
@@ -188,7 +192,7 @@ void CMonitor::onConnect(bool noRule) {
     g_pCompositor->scheduleFrameForMonitor(this);
 }
 
-void CMonitor::onDisconnect() {
+void CMonitor::onDisconnect(bool destroy) {
 
     if (renderTimer) {
         wl_event_source_remove(renderTimer);
@@ -276,7 +280,8 @@ void CMonitor::onDisconnect() {
 
     activeWorkspace = -1;
 
-    wlr_output_layout_remove(g_pCompositor->m_sWLROutputLayout, output);
+    if (!destroy)
+        wlr_output_layout_remove(g_pCompositor->m_sWLROutputLayout, output);
 
     wlr_output_enable(output, false);
 
@@ -298,7 +303,6 @@ void CMonitor::onDisconnect() {
 
         g_pHyprRenderer->m_pMostHzMonitor = pMonitorMostHz;
     }
-
     std::erase_if(g_pCompositor->m_vMonitors, [&](std::shared_ptr<CMonitor>& el) { return el.get() == this; });
 }
 
@@ -353,7 +357,7 @@ void CMonitor::setupDefaultWS(const SMonitorRule& monitorRule) {
                         findAvailableDefaultWS() :
                         getWorkspaceIDFromString(g_pConfigManager->getDefaultWorkspaceFor(szName), newDefaultWorkspaceName);
 
-    if (WORKSPACEID == INT_MAX || (WORKSPACEID >= SPECIAL_WORKSPACE_START && WORKSPACEID <= -2)) {
+    if (WORKSPACEID == WORKSPACE_INVALID || (WORKSPACEID >= SPECIAL_WORKSPACE_START && WORKSPACEID <= -2)) {
         WORKSPACEID             = g_pCompositor->m_vWorkspaces.size() + 1;
         newDefaultWorkspaceName = std::to_string(WORKSPACEID);
 
@@ -642,4 +646,13 @@ void CMonitor::moveTo(const Vector2D& pos) {
 
 Vector2D CMonitor::middle() {
     return vecPosition + vecSize / 2.f;
+}
+
+void CMonitor::updateMatrix() {
+    wlr_matrix_identity(projMatrix.data());
+    if (transform != WL_OUTPUT_TRANSFORM_NORMAL) {
+        wlr_matrix_translate(projMatrix.data(), vecPixelSize.x / 2.0, vecPixelSize.y / 2.0);
+        wlr_matrix_transform(projMatrix.data(), transform);
+        wlr_matrix_translate(projMatrix.data(), -vecTransformedSize.x / 2.0, -vecTransformedSize.y / 2.0);
+    }
 }

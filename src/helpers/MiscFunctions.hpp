@@ -27,13 +27,14 @@ void                             logSystemInfo();
 std::string                      execAndGet(const char*);
 int64_t                          getPPIDof(int64_t pid);
 int64_t                          configStringToInt(const std::string&);
-float                            getPlusMinusKeywordResult(std::string in, float relative);
+std::optional<float>             getPlusMinusKeywordResult(std::string in, float relative);
 void                             matrixProjection(float mat[9], int w, int h, wl_output_transform tr);
 double                           normalizeAngleRad(double ang);
 std::string                      replaceInString(std::string subject, const std::string& search, const std::string& replace);
 std::vector<SCallstackFrameInfo> getBacktrace();
 void                             throwError(const std::string& err);
 uint32_t                         drmFormatToGL(uint32_t drm);
+uint32_t                         glFormatToType(uint32_t gl);
 
 template <typename... Args>
 [[deprecated("use std::format instead")]] std::string getFormat(std::format_string<Args...> fmt, Args&&... args) {

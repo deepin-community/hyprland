@@ -42,13 +42,21 @@ SMasterWorkspaceData* CHyprMasterLayout::getMasterWorkspaceData(const int& ws) {
     const auto PWORKSPACEDATA   = &m_lMasterWorkspacesData.emplace_back();
     PWORKSPACEDATA->workspaceID = ws;
     const auto orientation      = &g_pConfigManager->getConfigValuePtr("master:orientation")->strValue;
-    if (*orientation == "top") {
+    const auto layoutoptsForWs  = g_pConfigManager->getWorkspaceRuleFor(g_pCompositor->getWorkspaceByID(ws)).layoutopts;
+    auto       orientationForWs = *orientation;
+
+    try {
+        if (layoutoptsForWs.contains("orientation"))
+            orientationForWs = std::any_cast<std::string>(layoutoptsForWs.at("orientation"));
+    } catch (std::exception& e) { Debug::log(ERR, "Error from layoutopt rules: {}", e.what()); }
+
+    if (orientationForWs == "top") {
         PWORKSPACEDATA->orientation = ORIENTATION_TOP;
-    } else if (*orientation == "right") {
+    } else if (orientationForWs == "right") {
         PWORKSPACEDATA->orientation = ORIENTATION_RIGHT;
-    } else if (*orientation == "bottom") {
+    } else if (orientationForWs == "bottom") {
         PWORKSPACEDATA->orientation = ORIENTATION_BOTTOM;
-    } else if (*orientation == "left") {
+    } else if (orientationForWs == "left") {
         PWORKSPACEDATA->orientation = ORIENTATION_LEFT;
     } else {
         PWORKSPACEDATA->orientation = ORIENTATION_CENTER;
@@ -99,7 +107,7 @@ void CHyprMasterLayout::onWindowCreatedTiling(CWindow* pWindow, eDirection direc
             if (!(wd->getDecorationFlags() & DECORATION_ALLOWS_MOUSE_INPUT))
                 continue;
 
-            if (wd->getWindowDecorationRegion().containsPoint(MOUSECOORDS)) {
+            if (g_pDecorationPositioner->getWindowDecorationBox(wd.get()).containsPoint(MOUSECOORDS)) {
                 if (!wd->onEndWindowDragOnDeco(pWindow, MOUSECOORDS))
                     return;
                 break;
@@ -111,9 +119,6 @@ void CHyprMasterLayout::onWindowCreatedTiling(CWindow* pWindow, eDirection direc
     if (OPENINGON && OPENINGON != PNODE && OPENINGON->pWindow->m_sGroupData.pNextWindow // target is group
         && pWindow->canBeGroupedInto(OPENINGON->pWindow)) {
 
-        if (!pWindow->m_sGroupData.pNextWindow)
-            pWindow->m_dWindowDecorations.emplace_back(std::make_unique<CHyprGroupBarDecoration>(pWindow));
-
         m_lMasterNodesData.remove(*PNODE);
 
         static const auto* USECURRPOS = &g_pConfigManager->getConfigValuePtr("group:insert_after_current")->intValue;
@@ -123,6 +128,9 @@ void CHyprMasterLayout::onWindowCreatedTiling(CWindow* pWindow, eDirection direc
         pWindow->applyGroupRules();
         pWindow->updateWindowDecos();
         recalculateWindow(pWindow);
+
+        if (!pWindow->getDecorationByType(DECORATION_GROUPBAR))
+            pWindow->addWindowDeco(std::make_unique<CHyprGroupBarDecoration>(pWindow));
 
         return;
     }

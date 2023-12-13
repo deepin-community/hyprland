@@ -33,9 +33,10 @@ struct wlr_layer_shell_v1 {
 	struct wl_listener display_destroy;
 
 	struct {
+		// struct wlr_layer_surface_v1 *
 		// Note: the output may be NULL. In this case, it is your
 		// responsibility to assign an output before returning.
-		struct wl_signal new_surface; // struct wlr_layer_surface_v1
+		struct wl_signal new_surface;
 		struct wl_signal destroy;
 	} events;
 
@@ -83,10 +84,12 @@ struct wlr_layer_surface_v1 {
 
 	char *namespace;
 
-	bool added, configured;
+	bool added, configured, mapped;
 	struct wl_list configure_list;
 
 	struct wlr_layer_surface_v1_state current, pending;
+
+	struct wl_listener surface_destroy;
 
 	struct {
 		/**
@@ -96,6 +99,20 @@ struct wlr_layer_surface_v1 {
 		 * mapped.
 		 */
 		struct wl_signal destroy;
+		/**
+		 * The map signal indicates that the client has configured itself and is
+		 * ready to be rendered by the compositor.
+		 */
+		struct wl_signal map;
+		/**
+		 * The unmap signal indicates that the surface is no longer in a state where
+		 * it should be rendered by the compositor. This might happen if the surface
+		 * no longer has a displayable buffer because either the surface has been
+		 * hidden or is about to be destroyed. It is guaranteed that the unmap signal
+		 * is raised before the destroy signal if the layer surface is destroyed
+		 * while mapped.
+		 */
+		struct wl_signal unmap;
 		/**
 		 * The new_popup signal is raised when a new popup is created. The data
 		 * parameter passed to the listener is a pointer to the new
@@ -107,8 +124,7 @@ struct wlr_layer_surface_v1 {
 	void *data;
 };
 
-struct wlr_layer_shell_v1 *wlr_layer_shell_v1_create(struct wl_display *display,
-	uint32_t version);
+struct wlr_layer_shell_v1 *wlr_layer_shell_v1_create(struct wl_display *display);
 
 /**
  * Notifies the layer surface to configure itself with this width/height. The
@@ -125,12 +141,17 @@ uint32_t wlr_layer_surface_v1_configure(struct wlr_layer_surface_v1 *surface,
 void wlr_layer_surface_v1_destroy(struct wlr_layer_surface_v1 *surface);
 
 /**
- * Get a struct wlr_layer_surface from a struct wlr_surface.
- *
- * Returns NULL if the surface doesn't have the layer surface role or if
- * the layer surface has been destroyed.
+ * Returns true if the surface has the layer surface role.
  */
-struct wlr_layer_surface_v1 *wlr_layer_surface_v1_try_from_wlr_surface(
+bool wlr_surface_is_layer_surface(struct wlr_surface *surface);
+
+/**
+ * Get a struct wlr_layer_surface from a struct wlr_surface.
+ * Asserts that the surface has the layer surface role.
+ * May return NULL even if the surface has the layer surface role if the
+ * corresponding layer surface has been destroyed.
+ */
+struct wlr_layer_surface_v1 *wlr_layer_surface_v1_from_wlr_surface(
 		struct wlr_surface *surface);
 
 /**

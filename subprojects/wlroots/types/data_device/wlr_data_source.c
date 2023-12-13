@@ -9,17 +9,17 @@
 #include <wlr/types/wlr_seat.h>
 #include <wlr/util/log.h>
 #include "types/wlr_data_device.h"
+#include "util/signal.h"
 
 void wlr_data_source_init(struct wlr_data_source *source,
 		const struct wlr_data_source_impl *impl) {
 	assert(impl->send);
 
-	*source = (struct wlr_data_source){
-		.impl = impl,
-		.actions = -1,
-	};
+	memset(source, 0, sizeof(*source));
+	source->impl = impl;
 	wl_array_init(&source->mime_types);
 	wl_signal_init(&source->events.destroy);
+	source->actions = -1;
 }
 
 void wlr_data_source_send(struct wlr_data_source *source, const char *mime_type,
@@ -40,7 +40,7 @@ void wlr_data_source_destroy(struct wlr_data_source *source) {
 		return;
 	}
 
-	wl_signal_emit_mutable(&source->events.destroy, source);
+	wlr_signal_emit_safe(&source->events.destroy, source);
 
 	char **p;
 	wl_array_for_each(p, &source->mime_types) {
@@ -91,8 +91,7 @@ static void client_data_source_accept(struct wlr_data_source *wlr_source,
 static struct wlr_client_data_source *client_data_source_from_wlr_data_source(
 		struct wlr_data_source *wlr_source) {
 	assert(wlr_source->impl->accept == client_data_source_accept);
-	struct wlr_client_data_source *source = wl_container_of(wlr_source, source, source);
-	return source;
+	return (struct wlr_client_data_source *)wlr_source;
 }
 
 static void client_data_source_accept(struct wlr_data_source *wlr_source,
@@ -235,7 +234,8 @@ static void data_source_handle_resource_destroy(struct wl_resource *resource) {
 struct wlr_client_data_source *client_data_source_create(
 		struct wl_client *client, uint32_t version, uint32_t id,
 		struct wl_list *resource_list) {
-	struct wlr_client_data_source *source = calloc(1, sizeof(*source));
+	struct wlr_client_data_source *source =
+		calloc(1, sizeof(struct wlr_client_data_source));
 	if (source == NULL) {
 		return NULL;
 	}
