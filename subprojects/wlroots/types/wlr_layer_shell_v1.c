@@ -22,8 +22,33 @@ static void resource_handle_destroy(struct wl_client *client,
 static const struct zwlr_layer_shell_v1_interface layer_shell_implementation;
 static const struct zwlr_layer_surface_v1_interface layer_surface_implementation;
 
+static void layer_surface_configure_destroy(
+		struct wlr_layer_surface_v1_configure *configure) {
+	if (configure == NULL) {
+		return;
+	}
+	wl_list_remove(&configure->link);
+	free(configure);
+}
+
+static void layer_surface_reset(struct wlr_layer_surface_v1 *surface) {
+	surface->configured = false;
+	surface->initialized = false;
+
+	struct wlr_xdg_popup *popup, *popup_tmp;
+	wl_list_for_each_safe(popup, popup_tmp, &surface->popups, link) {
+		wlr_xdg_popup_destroy(popup);
+	}
+
+	struct wlr_layer_surface_v1_configure *configure, *tmp;
+	wl_list_for_each_safe(configure, tmp, &surface->configure_list, link) {
+		layer_surface_configure_destroy(configure);
+	}
+}
+
 static void layer_surface_destroy(struct wlr_layer_surface_v1 *surface) {
 	wlr_surface_unmap(surface->surface);
+	layer_surface_reset(surface);
 
 	wl_signal_emit_mutable(&surface->events.destroy, surface);
 	wl_resource_set_user_data(surface->resource, NULL);
@@ -53,15 +78,6 @@ struct wlr_layer_surface_v1 *wlr_layer_surface_v1_try_from_wlr_surface(
 		return NULL;
 	}
 	return wlr_layer_surface_v1_from_resource(surface->role_resource);
-}
-
-static void layer_surface_configure_destroy(
-		struct wlr_layer_surface_v1_configure *configure) {
-	if (configure == NULL) {
-		return;
-	}
-	wl_list_remove(&configure->link);
-	free(configure);
 }
 
 static void layer_surface_handle_ack_configure(struct wl_client *client,
@@ -275,6 +291,11 @@ static const struct zwlr_layer_surface_v1_interface layer_surface_implementation
 
 uint32_t wlr_layer_surface_v1_configure(struct wlr_layer_surface_v1 *surface,
 		uint32_t width, uint32_t height) {
+	if (!surface->initialized) {
+		wlr_log(WLR_ERROR, "A configure is sent to an uninitialized wlr_layer_surface_v1 %p",
+			surface);
+	}
+
 	struct wl_display *display =
 		wl_client_get_display(wl_resource_get_client(surface->resource));
 	struct wlr_layer_surface_v1_configure *configure = calloc(1, sizeof(*configure));
@@ -307,6 +328,13 @@ static void layer_surface_role_commit(struct wlr_surface *wlr_surface) {
 		return;
 	}
 
+	if (wlr_surface_has_buffer(surface->surface) && !surface->configured) {
+		wl_resource_post_error(surface->resource,
+			ZWLR_LAYER_SHELL_V1_ERROR_ALREADY_CONSTRUCTED,
+			"layer_surface has never been configured");
+		return;
+	}
+
 	const uint32_t horiz = ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT |
 		ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT;
 	if (surface->pending.desired_width == 0 &&
@@ -327,46 +355,21 @@ static void layer_surface_role_commit(struct wlr_surface *wlr_surface) {
 		return;
 	}
 
+	if (surface->surface->unmap_commit) {
+		layer_surface_reset(surface);
+
+		assert(!surface->initialized);
+		surface->initial_commit = false;
+	} else {
+		surface->initial_commit = !surface->initialized;
+		surface->initialized = true;
+	}
+
 	surface->current = surface->pending;
 	surface->pending.committed = 0;
 
-	if (wlr_surface_has_buffer(surface->surface) && !surface->configured) {
-		wl_resource_post_error(surface->resource,
-			ZWLR_LAYER_SHELL_V1_ERROR_ALREADY_CONSTRUCTED,
-			"layer_surface has never been configured");
-		return;
-	}
-
-	if (!surface->added) {
-		surface->added = true;
-		wl_signal_emit_mutable(&surface->shell->events.new_surface, surface);
-		// Return early here as the compositor may have closed this layer surface
-		// in response to the new_surface event.
-		return;
-	}
-
-	if (surface->configured && wlr_surface_has_buffer(wlr_surface)) {
+	if (wlr_surface_has_buffer(wlr_surface)) {
 		wlr_surface_map(wlr_surface);
-	}
-}
-
-static void layer_surface_role_unmap(struct wlr_surface *wlr_surface) {
-	struct wlr_layer_surface_v1 *surface =
-		wlr_layer_surface_v1_try_from_wlr_surface(wlr_surface);
-	if (surface == NULL) {
-		return;
-	}
-
-	surface->configured = false;
-
-	struct wlr_xdg_popup *popup, *popup_tmp;
-	wl_list_for_each_safe(popup, popup_tmp, &surface->popups, link) {
-		wlr_xdg_popup_destroy(popup);
-	}
-
-	struct wlr_layer_surface_v1_configure *configure, *tmp;
-	wl_list_for_each_safe(configure, tmp, &surface->configure_list, link) {
-		layer_surface_configure_destroy(configure);
 	}
 }
 
@@ -383,7 +386,6 @@ static void layer_surface_role_destroy(struct wlr_surface *wlr_surface) {
 static const struct wlr_surface_role layer_surface_role = {
 	.name = "zwlr_layer_surface_v1",
 	.commit = layer_surface_role_commit,
-	.unmap = layer_surface_role_unmap,
 	.destroy = layer_surface_role_destroy,
 };
 
@@ -451,6 +453,8 @@ static void layer_shell_handle_get_layer_surface(struct wl_client *wl_client,
 		&layer_surface_implementation, surface, NULL);
 
 	wlr_surface_set_role_object(wlr_surface, surface->resource);
+
+	wl_signal_emit_mutable(&surface->shell->events.new_surface, surface);
 }
 
 static const struct zwlr_layer_shell_v1_interface layer_shell_implementation = {

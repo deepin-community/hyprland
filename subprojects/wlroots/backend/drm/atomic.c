@@ -6,6 +6,7 @@
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 #include "backend/drm/drm.h"
+#include "backend/drm/fb.h"
 #include "backend/drm/iface.h"
 #include "backend/drm/util.h"
 
@@ -61,13 +62,14 @@ static void atomic_begin(struct atomic *atom) {
 }
 
 static bool atomic_commit(struct atomic *atom,
-		struct wlr_drm_connector *conn, uint32_t flags) {
+		struct wlr_drm_connector *conn, struct wlr_drm_page_flip *page_flip,
+		uint32_t flags) {
 	struct wlr_drm_backend *drm = conn->backend;
 	if (atom->failed) {
 		return false;
 	}
 
-	int ret = drmModeAtomicCommit(drm->fd, atom->req, flags, drm);
+	int ret = drmModeAtomicCommit(drm->fd, atom->req, flags, page_flip);
 	if (ret != 0) {
 		wlr_drm_conn_log_errno(conn,
 			(flags & DRM_MODE_ATOMIC_TEST_ONLY) ? WLR_DEBUG : WLR_ERROR,
@@ -257,8 +259,8 @@ static void set_plane_props(struct atomic *atom, struct wlr_drm_backend *drm,
 }
 
 static bool atomic_crtc_commit(struct wlr_drm_connector *conn,
-		const struct wlr_drm_connector_state *state, uint32_t flags,
-		bool test_only) {
+		const struct wlr_drm_connector_state *state,
+		struct wlr_drm_page_flip *page_flip, uint32_t flags, bool test_only) {
 	struct wlr_drm_backend *drm = conn->backend;
 	struct wlr_output *output = &conn->output;
 	struct wlr_drm_crtc *crtc = conn->crtc;
@@ -314,12 +316,8 @@ static bool atomic_crtc_commit(struct wlr_drm_connector *conn,
 	}
 	if (modeset) {
 		flags |= DRM_MODE_ATOMIC_ALLOW_MODESET;
-	} else if (!test_only && (state->base->committed & WLR_OUTPUT_STATE_BUFFER)) {
-		// The wlr_output API requires non-modeset commits with a new buffer to
-		// wait for the frame event. However compositors often perform
-		// non-modesets commits without a new buffer without waiting for the
-		// frame event. In that case we need to make the KMS commit blocking,
-		// otherwise the kernel will error out with EBUSY.
+	}
+	if (!test_only && state->nonblock) {
 		flags |= DRM_MODE_ATOMIC_NONBLOCK;
 	}
 
@@ -367,7 +365,7 @@ static bool atomic_crtc_commit(struct wlr_drm_connector *conn,
 		}
 	}
 
-	bool ok = atomic_commit(&atom, conn, flags);
+	bool ok = atomic_commit(&atom, conn, page_flip, flags);
 	atomic_finish(&atom);
 
 	if (ok && !test_only) {

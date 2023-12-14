@@ -24,9 +24,8 @@ static void xdg_surface_configure_destroy(
 // 2) the xdg_surface role object implementation is destroyed
 
 static void reset_xdg_surface(struct wlr_xdg_surface *surface) {
-	surface->client_mapped = false;
-	surface->initialized = false;
 	surface->configured = false;
+	surface->initialized = false;
 
 	struct wlr_xdg_popup *popup, *popup_tmp;
 	wl_list_for_each_safe(popup, popup_tmp, &surface->popups, link) {
@@ -275,14 +274,14 @@ static void xdg_surface_role_commit(struct wlr_surface *wlr_surface) {
 		return;
 	}
 
-	surface->initial_commit = !surface->initialized;
-
-	if (surface->client_mapped && !wlr_surface_has_buffer(wlr_surface)) {
-		assert(!surface->initial_commit);
-		// This commit has unmapped the surface
+	if (surface->surface->unmap_commit) {
 		reset_xdg_surface_role_object(surface);
 		reset_xdg_surface(surface);
+
+		assert(!surface->initial_commit);
+		surface->initial_commit = false;
 	} else {
+		surface->initial_commit = !surface->initialized;
 		surface->initialized = true;
 	}
 
@@ -308,14 +307,7 @@ static void xdg_surface_role_commit(struct wlr_surface *wlr_surface) {
 		break;
 	}
 
-	if (!surface->added) {
-		surface->added = true;
-		wl_signal_emit_mutable(&surface->client->shell->events.new_surface,
-			surface);
-	}
-
 	if (wlr_surface_has_buffer(wlr_surface)) {
-		surface->client_mapped = true;
 		wlr_surface_map(wlr_surface);
 	}
 }
@@ -394,6 +386,8 @@ void create_xdg_surface(struct wlr_xdg_client *client, struct wlr_surface *wlr_s
 	wl_list_insert(&client->surfaces, &surface->link);
 
 	wlr_surface_set_role_object(wlr_surface, surface->resource);
+
+	wl_signal_emit_mutable(&surface->client->shell->events.new_surface, surface);
 }
 
 bool set_xdg_surface_role(struct wlr_xdg_surface *surface, enum wlr_xdg_surface_role role) {
@@ -467,6 +461,8 @@ void set_xdg_surface_role_object(struct wlr_xdg_surface *surface,
 void destroy_xdg_surface(struct wlr_xdg_surface *surface) {
 	destroy_xdg_surface_role_object(surface);
 	reset_xdg_surface(surface);
+
+	wl_signal_emit_mutable(&surface->events.destroy, NULL);
 
 	wl_list_remove(&surface->link);
 
