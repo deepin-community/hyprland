@@ -2,7 +2,6 @@
 #include <libinput.h>
 #include <wlr/interfaces/wlr_pointer.h>
 #include "backend/libinput.h"
-#include "util/signal.h"
 
 const struct wlr_pointer_impl libinput_pointer_impl = {
 	.name = "libinput-pointer",
@@ -29,61 +28,71 @@ void handle_pointer_motion(struct libinput_event *event,
 		struct wlr_pointer *pointer) {
 	struct libinput_event_pointer *pevent =
 		libinput_event_get_pointer_event(event);
-	struct wlr_pointer_motion_event wlr_event = { 0 };
-	wlr_event.pointer = pointer;
-	wlr_event.time_msec =
-		usec_to_msec(libinput_event_pointer_get_time_usec(pevent));
-	wlr_event.delta_x = libinput_event_pointer_get_dx(pevent);
-	wlr_event.delta_y = libinput_event_pointer_get_dy(pevent);
-	wlr_event.unaccel_dx = libinput_event_pointer_get_dx_unaccelerated(pevent);
-	wlr_event.unaccel_dy = libinput_event_pointer_get_dy_unaccelerated(pevent);
-	wlr_signal_emit_safe(&pointer->events.motion, &wlr_event);
-	wlr_signal_emit_safe(&pointer->events.frame, pointer);
+	struct wlr_pointer_motion_event wlr_event = {
+		.pointer = pointer,
+		.time_msec = usec_to_msec(libinput_event_pointer_get_time_usec(pevent)),
+		.delta_x = libinput_event_pointer_get_dx(pevent),
+		.delta_y = libinput_event_pointer_get_dy(pevent),
+		.unaccel_dx = libinput_event_pointer_get_dx_unaccelerated(pevent),
+		.unaccel_dy = libinput_event_pointer_get_dy_unaccelerated(pevent),
+	};
+	wl_signal_emit_mutable(&pointer->events.motion, &wlr_event);
+	wl_signal_emit_mutable(&pointer->events.frame, pointer);
 }
 
 void handle_pointer_motion_abs(struct libinput_event *event,
 		struct wlr_pointer *pointer) {
 	struct libinput_event_pointer *pevent =
 		libinput_event_get_pointer_event(event);
-	struct wlr_pointer_motion_absolute_event wlr_event = { 0 };
-	wlr_event.pointer = pointer;
-	wlr_event.time_msec =
-		usec_to_msec(libinput_event_pointer_get_time_usec(pevent));
-	wlr_event.x = libinput_event_pointer_get_absolute_x_transformed(pevent, 1);
-	wlr_event.y = libinput_event_pointer_get_absolute_y_transformed(pevent, 1);
-	wlr_signal_emit_safe(&pointer->events.motion_absolute, &wlr_event);
-	wlr_signal_emit_safe(&pointer->events.frame, pointer);
+	struct wlr_pointer_motion_absolute_event wlr_event = {
+		.pointer = pointer,
+		.time_msec = usec_to_msec(libinput_event_pointer_get_time_usec(pevent)),
+		.x = libinput_event_pointer_get_absolute_x_transformed(pevent, 1),
+		.y = libinput_event_pointer_get_absolute_y_transformed(pevent, 1),
+	};
+	wl_signal_emit_mutable(&pointer->events.motion_absolute, &wlr_event);
+	wl_signal_emit_mutable(&pointer->events.frame, pointer);
 }
 
 void handle_pointer_button(struct libinput_event *event,
 		struct wlr_pointer *pointer) {
 	struct libinput_event_pointer *pevent =
 		libinput_event_get_pointer_event(event);
-	struct wlr_pointer_button_event wlr_event = { 0 };
-	wlr_event.pointer = pointer;
-	wlr_event.time_msec =
-		usec_to_msec(libinput_event_pointer_get_time_usec(pevent));
-	wlr_event.button = libinput_event_pointer_get_button(pevent);
+	struct wlr_pointer_button_event wlr_event = {
+		.pointer = pointer,
+		.time_msec = usec_to_msec(libinput_event_pointer_get_time_usec(pevent)),
+		.button = libinput_event_pointer_get_button(pevent),
+	};
+	// Ignore events which aren't a seat-wide state change. For instance, if
+	// the same button is pressed twice on the same seat, ignore the second
+	// press.
+	uint32_t seat_count = libinput_event_pointer_get_seat_button_count(pevent);
 	switch (libinput_event_pointer_get_button_state(pevent)) {
 	case LIBINPUT_BUTTON_STATE_PRESSED:
 		wlr_event.state = WLR_BUTTON_PRESSED;
+		if (seat_count != 1) {
+			return;
+		}
 		break;
 	case LIBINPUT_BUTTON_STATE_RELEASED:
 		wlr_event.state = WLR_BUTTON_RELEASED;
+		if (seat_count != 0) {
+			return;
+		}
 		break;
 	}
-	wlr_signal_emit_safe(&pointer->events.button, &wlr_event);
-	wlr_signal_emit_safe(&pointer->events.frame, pointer);
+	wl_signal_emit_mutable(&pointer->events.button, &wlr_event);
+	wl_signal_emit_mutable(&pointer->events.frame, pointer);
 }
 
 void handle_pointer_axis(struct libinput_event *event,
 		struct wlr_pointer *pointer) {
 	struct libinput_event_pointer *pevent =
 		libinput_event_get_pointer_event(event);
-	struct wlr_pointer_axis_event wlr_event = { 0 };
-	wlr_event.pointer = pointer;
-	wlr_event.time_msec =
-		usec_to_msec(libinput_event_pointer_get_time_usec(pevent));
+	struct wlr_pointer_axis_event wlr_event = {
+		.pointer = pointer,
+		.time_msec = usec_to_msec(libinput_event_pointer_get_time_usec(pevent)),
+	};
 	switch (libinput_event_pointer_get_axis_source(pevent)) {
 	case LIBINPUT_POINTER_AXIS_SOURCE_WHEEL:
 		wlr_event.source = WLR_AXIS_SOURCE_WHEEL;
@@ -120,21 +129,21 @@ void handle_pointer_axis(struct libinput_event *event,
 		wlr_event.delta_discrete =
 			libinput_event_pointer_get_axis_value_discrete(pevent, axes[i]);
 		wlr_event.delta_discrete *= WLR_POINTER_AXIS_DISCRETE_STEP;
-		wlr_signal_emit_safe(&pointer->events.axis, &wlr_event);
+		wl_signal_emit_mutable(&pointer->events.axis, &wlr_event);
 	}
-	wlr_signal_emit_safe(&pointer->events.frame, pointer);
+	wl_signal_emit_mutable(&pointer->events.frame, pointer);
 }
 
-#if LIBINPUT_HAS_SCROLL_VALUE120
+#if HAVE_LIBINPUT_SCROLL_VALUE120
 void handle_pointer_axis_value120(struct libinput_event *event,
 		struct wlr_pointer *pointer, enum wlr_axis_source source) {
 	struct libinput_event_pointer *pevent =
 		libinput_event_get_pointer_event(event);
-	struct wlr_pointer_axis_event wlr_event = { 0 };
-	wlr_event.pointer = pointer;
-	wlr_event.time_msec =
-		usec_to_msec(libinput_event_pointer_get_time_usec(pevent));
-	wlr_event.source = source;
+	struct wlr_pointer_axis_event wlr_event = {
+		.pointer = pointer,
+		.time_msec = usec_to_msec(libinput_event_pointer_get_time_usec(pevent)),
+		.source = source,
+	};
 
 	const enum libinput_pointer_axis axes[] = {
 		LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL,
@@ -158,9 +167,9 @@ void handle_pointer_axis_value120(struct libinput_event *event,
 			wlr_event.delta_discrete =
 				libinput_event_pointer_get_scroll_value_v120(pevent, axes[i]);
 		}
-		wlr_signal_emit_safe(&pointer->events.axis, &wlr_event);
+		wl_signal_emit_mutable(&pointer->events.axis, &wlr_event);
 	}
-	wlr_signal_emit_safe(&pointer->events.frame, pointer);
+	wl_signal_emit_mutable(&pointer->events.frame, pointer);
 }
 #endif
 
@@ -174,7 +183,7 @@ void handle_pointer_swipe_begin(struct libinput_event *event,
 			usec_to_msec(libinput_event_gesture_get_time_usec(gevent)),
 		.fingers = libinput_event_gesture_get_finger_count(gevent),
 	};
-	wlr_signal_emit_safe(&pointer->events.swipe_begin, &wlr_event);
+	wl_signal_emit_mutable(&pointer->events.swipe_begin, &wlr_event);
 }
 
 void handle_pointer_swipe_update(struct libinput_event *event,
@@ -189,7 +198,7 @@ void handle_pointer_swipe_update(struct libinput_event *event,
 		.dx = libinput_event_gesture_get_dx(gevent),
 		.dy = libinput_event_gesture_get_dy(gevent),
 	};
-	wlr_signal_emit_safe(&pointer->events.swipe_update, &wlr_event);
+	wl_signal_emit_mutable(&pointer->events.swipe_update, &wlr_event);
 }
 
 void handle_pointer_swipe_end(struct libinput_event *event,
@@ -202,7 +211,7 @@ void handle_pointer_swipe_end(struct libinput_event *event,
 			usec_to_msec(libinput_event_gesture_get_time_usec(gevent)),
 		.cancelled = libinput_event_gesture_get_cancelled(gevent),
 	};
-	wlr_signal_emit_safe(&pointer->events.swipe_end, &wlr_event);
+	wl_signal_emit_mutable(&pointer->events.swipe_end, &wlr_event);
 }
 
 void handle_pointer_pinch_begin(struct libinput_event *event,
@@ -215,7 +224,7 @@ void handle_pointer_pinch_begin(struct libinput_event *event,
 			usec_to_msec(libinput_event_gesture_get_time_usec(gevent)),
 		.fingers = libinput_event_gesture_get_finger_count(gevent),
 	};
-	wlr_signal_emit_safe(&pointer->events.pinch_begin, &wlr_event);
+	wl_signal_emit_mutable(&pointer->events.pinch_begin, &wlr_event);
 }
 
 void handle_pointer_pinch_update(struct libinput_event *event,
@@ -232,7 +241,7 @@ void handle_pointer_pinch_update(struct libinput_event *event,
 		.scale = libinput_event_gesture_get_scale(gevent),
 		.rotation = libinput_event_gesture_get_angle_delta(gevent),
 	};
-	wlr_signal_emit_safe(&pointer->events.pinch_update, &wlr_event);
+	wl_signal_emit_mutable(&pointer->events.pinch_update, &wlr_event);
 }
 
 void handle_pointer_pinch_end(struct libinput_event *event,
@@ -245,7 +254,7 @@ void handle_pointer_pinch_end(struct libinput_event *event,
 			usec_to_msec(libinput_event_gesture_get_time_usec(gevent)),
 		.cancelled = libinput_event_gesture_get_cancelled(gevent),
 	};
-	wlr_signal_emit_safe(&pointer->events.pinch_end, &wlr_event);
+	wl_signal_emit_mutable(&pointer->events.pinch_end, &wlr_event);
 }
 
 void handle_pointer_hold_begin(struct libinput_event *event,
@@ -258,7 +267,7 @@ void handle_pointer_hold_begin(struct libinput_event *event,
 			usec_to_msec(libinput_event_gesture_get_time_usec(gevent)),
 		.fingers = libinput_event_gesture_get_finger_count(gevent),
 	};
-	wlr_signal_emit_safe(&pointer->events.hold_begin, &wlr_event);
+	wl_signal_emit_mutable(&pointer->events.hold_begin, &wlr_event);
 }
 
 void handle_pointer_hold_end(struct libinput_event *event,
@@ -271,5 +280,5 @@ void handle_pointer_hold_end(struct libinput_event *event,
 			usec_to_msec(libinput_event_gesture_get_time_usec(gevent)),
 		.cancelled = libinput_event_gesture_get_cancelled(gevent),
 	};
-	wlr_signal_emit_safe(&pointer->events.hold_end, &wlr_event);
+	wl_signal_emit_mutable(&pointer->events.hold_end, &wlr_event);
 }

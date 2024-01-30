@@ -11,7 +11,6 @@
 #include <wlr/interfaces/wlr_switch.h>
 #include <wlr/util/log.h>
 #include "backend/libinput.h"
-#include "util/signal.h"
 
 void destroy_libinput_input_device(struct wlr_libinput_input_device *dev) {
 	if (dev->keyboard.impl) {
@@ -70,8 +69,7 @@ static void handle_device_added(struct wlr_libinput_backend *backend,
 	const char *name = libinput_device_get_name(libinput_dev);
 	wlr_log(WLR_DEBUG, "Adding %s [%d:%d]", name, vendor, product);
 
-	struct wlr_libinput_input_device *dev =
-		calloc(1, sizeof(struct wlr_libinput_input_device));
+	struct wlr_libinput_input_device *dev = calloc(1, sizeof(*dev));
 	if (dev == NULL) {
 		wlr_log_errno(WLR_ERROR, "failed to allocate wlr_libinput_input_device");
 		return;
@@ -87,7 +85,7 @@ static void handle_device_added(struct wlr_libinput_backend *backend,
 			libinput_dev, LIBINPUT_DEVICE_CAP_KEYBOARD)) {
 		init_device_keyboard(dev);
 
-		wlr_signal_emit_safe(&backend->backend.events.new_input,
+		wl_signal_emit_mutable(&backend->backend.events.new_input,
 			&dev->keyboard.base);
 	}
 
@@ -95,35 +93,35 @@ static void handle_device_added(struct wlr_libinput_backend *backend,
 			libinput_dev, LIBINPUT_DEVICE_CAP_POINTER)) {
 		init_device_pointer(dev);
 
-		wlr_signal_emit_safe(&backend->backend.events.new_input,
+		wl_signal_emit_mutable(&backend->backend.events.new_input,
 			&dev->pointer.base);
 	}
 
 	if (libinput_device_has_capability(
 			libinput_dev, LIBINPUT_DEVICE_CAP_SWITCH)) {
 		init_device_switch(dev);
-		wlr_signal_emit_safe(&backend->backend.events.new_input,
+		wl_signal_emit_mutable(&backend->backend.events.new_input,
 			&dev->switch_device.base);
 	}
 
 	if (libinput_device_has_capability(
 			libinput_dev, LIBINPUT_DEVICE_CAP_TOUCH)) {
 		init_device_touch(dev);
-		wlr_signal_emit_safe(&backend->backend.events.new_input,
+		wl_signal_emit_mutable(&backend->backend.events.new_input,
 			&dev->touch.base);
 	}
 
 	if (libinput_device_has_capability(libinput_dev,
 			LIBINPUT_DEVICE_CAP_TABLET_TOOL)) {
 		init_device_tablet(dev);
-		wlr_signal_emit_safe(&backend->backend.events.new_input,
+		wl_signal_emit_mutable(&backend->backend.events.new_input,
 			&dev->tablet.base);
 	}
 
 	if (libinput_device_has_capability(
 			libinput_dev, LIBINPUT_DEVICE_CAP_TABLET_PAD)) {
 		init_device_tablet_pad(dev);
-		wlr_signal_emit_safe(&backend->backend.events.new_input,
+		wl_signal_emit_mutable(&backend->backend.events.new_input,
 			&dev->tablet_pad.base);
 	}
 
@@ -134,18 +132,11 @@ static void handle_device_added(struct wlr_libinput_backend *backend,
 }
 
 static void handle_device_removed(struct wlr_libinput_backend *backend,
-		struct libinput_device *libinput_dev) {
-	int vendor = libinput_device_get_id_vendor(libinput_dev);
-	int product = libinput_device_get_id_product(libinput_dev);
-	const char *name = libinput_device_get_name(libinput_dev);
+		struct wlr_libinput_input_device *dev) {
+	int vendor = libinput_device_get_id_vendor(dev->handle);
+	int product = libinput_device_get_id_product(dev->handle);
+	const char *name = libinput_device_get_name(dev->handle);
 	wlr_log(WLR_DEBUG, "Removing %s [%d:%d]", name, vendor, product);
-
-	struct wlr_libinput_input_device *dev =
-		libinput_device_get_user_data(libinput_dev);
-	if (dev == NULL) {
-		wlr_log(WLR_ERROR, "libinput_device has no wlr_libinput_input_device");
-		return;
-	}
 
 	destroy_libinput_input_device(dev);
 }
@@ -156,12 +147,18 @@ void handle_libinput_event(struct wlr_libinput_backend *backend,
 	struct wlr_libinput_input_device *dev =
 		libinput_device_get_user_data(libinput_dev);
 	enum libinput_event_type event_type = libinput_event_get_type(event);
+
+	if (dev == NULL && event_type != LIBINPUT_EVENT_DEVICE_ADDED) {
+		wlr_log(WLR_ERROR, "libinput_device has no wlr_libinput_input_device");
+		return;
+	}
+
 	switch (event_type) {
 	case LIBINPUT_EVENT_DEVICE_ADDED:
 		handle_device_added(backend, libinput_dev);
 		break;
 	case LIBINPUT_EVENT_DEVICE_REMOVED:
-		handle_device_removed(backend, libinput_dev);
+		handle_device_removed(backend, dev);
 		break;
 	case LIBINPUT_EVENT_KEYBOARD_KEY:
 		handle_keyboard_key(event, &dev->keyboard);
@@ -176,12 +173,12 @@ void handle_libinput_event(struct wlr_libinput_backend *backend,
 		handle_pointer_button(event, &dev->pointer);
 		break;
 	case LIBINPUT_EVENT_POINTER_AXIS:
-#if !LIBINPUT_HAS_SCROLL_VALUE120
+#if !HAVE_LIBINPUT_SCROLL_VALUE120
 		/* This event must be ignored in favour of the SCROLL_* events */
 		handle_pointer_axis(event, &dev->pointer);
 #endif
 		break;
-#if LIBINPUT_HAS_SCROLL_VALUE120
+#if HAVE_LIBINPUT_SCROLL_VALUE120
 	case LIBINPUT_EVENT_POINTER_SCROLL_WHEEL:
 		handle_pointer_axis_value120(event, &dev->pointer,
 			WLR_AXIS_SOURCE_WHEEL);
@@ -252,7 +249,7 @@ void handle_libinput_event(struct wlr_libinput_backend *backend,
 	case LIBINPUT_EVENT_GESTURE_PINCH_END:
 		handle_pointer_pinch_end(event, &dev->pointer);
 		break;
-#if LIBINPUT_HAS_HOLD_GESTURES
+#if HAVE_LIBINPUT_HOLD_GESTURES
 	case LIBINPUT_EVENT_GESTURE_HOLD_BEGIN:
 		handle_pointer_hold_begin(event, &dev->pointer);
 		break;

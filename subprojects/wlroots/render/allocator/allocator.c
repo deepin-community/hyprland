@@ -14,7 +14,6 @@
 #include "render/allocator/drm_dumb.h"
 #include "render/allocator/shm.h"
 #include "render/wlr_renderer.h"
-#include "util/signal.h"
 
 #if WLR_HAS_GBM_ALLOCATOR
 #include "render/allocator/gbm.h"
@@ -23,9 +22,10 @@
 void wlr_allocator_init(struct wlr_allocator *alloc,
 		const struct wlr_allocator_interface *impl, uint32_t buffer_caps) {
 	assert(impl && impl->destroy && impl->create_buffer);
-	memset(alloc, 0, sizeof(*alloc));
-	alloc->impl = impl;
-	alloc->buffer_caps = buffer_caps;
+	*alloc = (struct wlr_allocator){
+		.impl = impl,
+		.buffer_caps = buffer_caps,
+	};
 	wl_signal_init(&alloc->events.destroy);
 }
 
@@ -70,11 +70,11 @@ static int reopen_drm_node(int drm_fd, bool allow_render_node) {
 
 	free(name);
 
-	// If we're using a DRM primary node (e.g. because we're running under the
-	// DRM backend, or because we're on split render/display machine), we need
-	// to use the legacy DRM authentication mechanism to have the permission to
-	// manipulate buffers.
-	if (drmGetNodeTypeFromFd(new_fd) == DRM_NODE_PRIMARY) {
+	// If we're using a DRM primary node and we are DRM master (e.g. because
+	// we're running under the DRM backend), we need to use the legacy DRM
+	// authentication mechanism to have the permission to manipulate DRM dumb
+	// buffers.
+	if (drmIsMaster(drm_fd) && drmGetNodeTypeFromFd(new_fd) == DRM_NODE_PRIMARY) {
 		drm_magic_t magic;
 		if (drmGetMagic(new_fd, &magic) < 0) {
 			wlr_log_errno(WLR_ERROR, "drmGetMagic failed");
@@ -100,10 +100,10 @@ struct wlr_allocator *allocator_autocreate_with_drm_fd(
 
 	struct wlr_allocator *alloc = NULL;
 
-#if WLR_HAS_GBM_ALLOCATOR
 	uint32_t gbm_caps = WLR_BUFFER_CAP_DMABUF;
 	if ((backend_caps & gbm_caps) && (renderer_caps & gbm_caps)
 			&& drm_fd >= 0) {
+#if WLR_HAS_GBM_ALLOCATOR
 		wlr_log(WLR_DEBUG, "Trying to create gbm allocator");
 		int gbm_fd = reopen_drm_node(drm_fd, true);
 		if (gbm_fd < 0) {
@@ -114,8 +114,10 @@ struct wlr_allocator *allocator_autocreate_with_drm_fd(
 		}
 		close(gbm_fd);
 		wlr_log(WLR_DEBUG, "Failed to create gbm allocator");
-	}
+#else
+		wlr_log(WLR_DEBUG, "Skipping gbm allocator: disabled at compile-time");
 #endif
+	}
 
 	uint32_t shm_caps = WLR_BUFFER_CAP_SHM | WLR_BUFFER_CAP_DATA_PTR;
 	if ((backend_caps & shm_caps) && (renderer_caps & shm_caps)) {
@@ -159,7 +161,7 @@ void wlr_allocator_destroy(struct wlr_allocator *alloc) {
 	if (alloc == NULL) {
 		return;
 	}
-	wlr_signal_emit_safe(&alloc->events.destroy, NULL);
+	wl_signal_emit_mutable(&alloc->events.destroy, NULL);
 	alloc->impl->destroy(alloc);
 }
 

@@ -6,12 +6,13 @@
 #include <wlr/backend/session.h>
 #include <wlr/util/log.h>
 #include "backend/libinput.h"
-#include "util/signal.h"
+#include "util/env.h"
 
 static struct wlr_libinput_backend *get_libinput_backend_from_backend(
 		struct wlr_backend *wlr_backend) {
 	assert(wlr_backend_is_libinput(wlr_backend));
-	return (struct wlr_libinput_backend *)wlr_backend;
+	struct wlr_libinput_backend *backend = wl_container_of(wlr_backend, backend, backend);
+	return backend;
 }
 
 static int libinput_open_restricted(const char *path,
@@ -104,13 +105,8 @@ static bool backend_start(struct wlr_backend *wlr_backend) {
 	libinput_log_set_priority(backend->libinput_context, LIBINPUT_LOG_PRIORITY_ERROR);
 
 	int libinput_fd = libinput_get_fd(backend->libinput_context);
-	char *no_devs = getenv("WLR_LIBINPUT_NO_DEVICES");
-	if (no_devs) {
-		if (strcmp(no_devs, "1") != 0) {
-			no_devs = NULL;
-		}
-	}
-	if (!no_devs && wl_list_empty(&backend->devices)) {
+
+	if (!env_parse_bool("WLR_LIBINPUT_NO_DEVICES") && wl_list_empty(&backend->devices)) {
 		handle_libinput_readable(libinput_fd, WL_EVENT_READABLE, backend);
 		if (wl_list_empty(&backend->devices)) {
 			wlr_log(WLR_ERROR, "libinput initialization failed, no input devices");
@@ -198,8 +194,7 @@ static void handle_display_destroy(struct wl_listener *listener, void *data) {
 
 struct wlr_backend *wlr_libinput_backend_create(struct wl_display *display,
 		struct wlr_session *session) {
-	struct wlr_libinput_backend *backend =
-		calloc(1, sizeof(struct wlr_libinput_backend));
+	struct wlr_libinput_backend *backend = calloc(1, sizeof(*backend));
 	if (!backend) {
 		wlr_log(WLR_ERROR, "Allocation failed: %s", strerror(errno));
 		return NULL;

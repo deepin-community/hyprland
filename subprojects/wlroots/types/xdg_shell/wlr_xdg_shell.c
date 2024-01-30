@@ -1,9 +1,8 @@
 #include <assert.h>
 #include <stdlib.h>
 #include "types/wlr_xdg_shell.h"
-#include "util/signal.h"
 
-#define WM_BASE_VERSION 4
+#define WM_BASE_VERSION 6
 
 static const struct xdg_wm_base_interface xdg_shell_impl;
 
@@ -84,7 +83,7 @@ static int xdg_client_ping_timeout(void *user_data) {
 
 	struct wlr_xdg_surface *surface;
 	wl_list_for_each(surface, &client->surfaces, link) {
-		wlr_signal_emit_safe(&surface->events.ping_timeout, NULL);
+		wl_signal_emit_mutable(&surface->events.ping_timeout, NULL);
 	}
 
 	client->ping_serial = 0;
@@ -94,10 +93,8 @@ static int xdg_client_ping_timeout(void *user_data) {
 static void xdg_shell_bind(struct wl_client *wl_client, void *data,
 		uint32_t version, uint32_t id) {
 	struct wlr_xdg_shell *xdg_shell = data;
-	assert(wl_client && xdg_shell);
 
-	struct wlr_xdg_client *client =
-		calloc(1, sizeof(struct wlr_xdg_client));
+	struct wlr_xdg_client *client = calloc(1, sizeof(*client));
 	if (client == NULL) {
 		wl_client_post_no_memory(wl_client);
 		return;
@@ -131,7 +128,7 @@ static void xdg_shell_bind(struct wl_client *wl_client, void *data,
 static void handle_display_destroy(struct wl_listener *listener, void *data) {
 	struct wlr_xdg_shell *xdg_shell =
 		wl_container_of(listener, xdg_shell, display_destroy);
-	wlr_signal_emit_safe(&xdg_shell->events.destroy, xdg_shell);
+	wl_signal_emit_mutable(&xdg_shell->events.destroy, xdg_shell);
 	wl_list_remove(&xdg_shell->display_destroy.link);
 	wl_global_destroy(xdg_shell->global);
 	free(xdg_shell);
@@ -141,8 +138,7 @@ struct wlr_xdg_shell *wlr_xdg_shell_create(struct wl_display *display,
 		uint32_t version) {
 	assert(version <= WM_BASE_VERSION);
 
-	struct wlr_xdg_shell *xdg_shell =
-		calloc(1, sizeof(struct wlr_xdg_shell));
+	struct wlr_xdg_shell *xdg_shell = calloc(1, sizeof(*xdg_shell));
 	if (!xdg_shell) {
 		return NULL;
 	}
@@ -162,6 +158,8 @@ struct wlr_xdg_shell *wlr_xdg_shell_create(struct wl_display *display,
 	xdg_shell->global = global;
 
 	wl_signal_init(&xdg_shell->events.new_surface);
+	wl_signal_init(&xdg_shell->events.new_toplevel);
+	wl_signal_init(&xdg_shell->events.new_popup);
 	wl_signal_init(&xdg_shell->events.destroy);
 
 	xdg_shell->display_destroy.notify = handle_display_destroy;

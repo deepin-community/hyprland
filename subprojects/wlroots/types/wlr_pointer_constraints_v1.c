@@ -6,10 +6,8 @@
 #include <wayland-server-core.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_pointer_constraints_v1.h>
-#include <wlr/types/wlr_region.h>
 #include <wlr/util/box.h>
 #include <wlr/util/log.h>
-#include "util/signal.h"
 
 static const struct zwp_locked_pointer_v1_interface locked_pointer_impl;
 static const struct zwp_confined_pointer_v1_interface confined_pointer_impl;
@@ -47,7 +45,7 @@ static void pointer_constraint_destroy(struct wlr_pointer_constraint_v1 *constra
 
 	wlr_log(WLR_DEBUG, "destroying constraint %p", constraint);
 
-	wlr_signal_emit_safe(&constraint->events.destroy, constraint);
+	wl_signal_emit_mutable(&constraint->events.destroy, constraint);
 
 	wl_resource_set_user_data(constraint->resource, NULL);
 	wl_list_remove(&constraint->link);
@@ -73,7 +71,7 @@ static void pointer_constraint_set_region(
 	pixman_region32_clear(&constraint->pending.region);
 
 	if (region_resource) {
-		pixman_region32_t *region = wlr_region_from_resource(region_resource);
+		const pixman_region32_t *region = wlr_region_from_resource(region_resource);
 		pixman_region32_copy(&constraint->pending.region, region);
 	}
 
@@ -130,7 +128,7 @@ static void pointer_constraint_commit(
 	}
 
 	if (updated_region) {
-		wlr_signal_emit_safe(&constraint->events.set_region, NULL);
+		wl_signal_emit_mutable(&constraint->events.set_region, NULL);
 	}
 }
 
@@ -246,7 +244,7 @@ static void pointer_constraint_create(struct wl_client *client,
 
 	wl_list_insert(&pointer_constraints->constraints, &constraint->link);
 
-	wlr_signal_emit_safe(&pointer_constraints->events.new_constraint,
+	wl_signal_emit_mutable(&pointer_constraints->events.new_constraint,
 		constraint);
 }
 
@@ -277,7 +275,6 @@ static const struct zwp_pointer_constraints_v1_interface
 static void pointer_constraints_bind(struct wl_client *client, void *data,
 		uint32_t version, uint32_t id) {
 	struct wlr_pointer_constraints_v1 *pointer_constraints = data;
-	assert(client && pointer_constraints);
 
 	struct wl_resource *resource = wl_resource_create(client,
 		&zwp_pointer_constraints_v1_interface, version, id);

@@ -41,6 +41,11 @@ struct wlr_fbox {
 };
 
 /**
+ * Functions below accept NULL where a box is expected, which is treated
+ * the same as an empty box.
+ */
+
+/**
  * Finds the closest point within the box bounds.
  *
  * Returns NAN if the box is empty.
@@ -91,5 +96,19 @@ bool wlr_fbox_empty(const struct wlr_fbox *box);
  */
 void wlr_fbox_transform(struct wlr_fbox *dest, const struct wlr_fbox *box,
 	enum wl_output_transform transform, double width, double height);
+
+#ifdef WLR_USE_UNSTABLE
+
+/**
+ * Returns true if the two boxes are equal, false otherwise.
+ */
+bool wlr_box_equal(const struct wlr_box *a, const struct wlr_box *b);
+
+/**
+ * Returns true if the two boxes are equal, false otherwise.
+ */
+bool wlr_fbox_equal(const struct wlr_fbox *a, const struct wlr_fbox *b);
+
+#endif
 
 #endif
