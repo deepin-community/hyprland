@@ -15,6 +15,7 @@ struct wlr_egl {
 		bool EXT_image_dma_buf_import;
 		bool EXT_image_dma_buf_import_modifiers;
 		bool IMG_context_priority;
+		bool EXT_create_context_robustness;
 
 		// Device extensions
 		bool EXT_device_drm;
@@ -24,13 +25,13 @@ struct wlr_egl {
 		bool EXT_device_query;
 		bool KHR_platform_gbm;
 		bool EXT_platform_device;
+		bool KHR_display_reference;
 	} exts;
 
 	struct {
 		PFNEGLGETPLATFORMDISPLAYEXTPROC eglGetPlatformDisplayEXT;
 		PFNEGLCREATEIMAGEKHRPROC eglCreateImageKHR;
 		PFNEGLDESTROYIMAGEKHRPROC eglDestroyImageKHR;
-		PFNEGLQUERYWAYLANDBUFFERWL eglQueryWaylandBufferWL;
 		PFNEGLQUERYDMABUFFORMATSEXTPROC eglQueryDmaBufFormatsEXT;
 		PFNEGLQUERYDMABUFMODIFIERSEXTPROC eglQueryDmaBufModifiersEXT;
 		PFNEGLDEBUGMESSAGECONTROLKHRPROC eglDebugMessageControlKHR;

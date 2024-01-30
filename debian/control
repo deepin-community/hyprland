@@ -58,6 +58,7 @@ Build-Depends: debhelper-compat (= 13),
                 hwdata,
                 jq,
                 cpio,
+                libtomlplusplus-dev,
 Standards-Version: 4.6.2
 Homepage: https://hyprland.org
 Vcs-Browser: https://https://github.com/hyprwm/Hyprland

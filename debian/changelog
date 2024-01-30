@@ -1,3 +1,10 @@
+hyprland (0.34.0-0deepin1) unstable; urgency=medium
+
+  * New upstream version
+  * Add new dep libtomlplusplus-dev
+
+ -- xiangzelong <xiangzelong@deepin.org>  Tue, 30 Jan 2024 17:02:50 +0800
+
 hyprland (0.33.1-0deepin1) unstable; urgency=medium
 
   * New upstream version

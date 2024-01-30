@@ -4,12 +4,10 @@
 #include <stdlib.h>
 #include <time.h>
 #include <wlr/backend/interface.h>
-#include <wlr/backend/session.h>
 #include <wlr/types/wlr_buffer.h>
 #include <wlr/util/log.h>
 #include "backend/backend.h"
 #include "backend/multi.h"
-#include "util/signal.h"
 
 struct subbackend_state {
 	struct wlr_backend *backend;
@@ -23,7 +21,8 @@ struct subbackend_state {
 static struct wlr_multi_backend *multi_backend_from_backend(
 		struct wlr_backend *wlr_backend) {
 	assert(wlr_backend_is_multi(wlr_backend));
-	return (struct wlr_multi_backend *)wlr_backend;
+	struct wlr_multi_backend *backend = wl_container_of(wlr_backend, backend, backend);
+	return backend;
 }
 
 static bool multi_backend_start(struct wlr_backend *wlr_backend) {
@@ -64,26 +63,6 @@ static void multi_backend_destroy(struct wlr_backend *wlr_backend) {
 	free(backend);
 }
 
-static struct wlr_session *multi_backend_get_session(
-		struct wlr_backend *_backend) {
-	struct wlr_multi_backend *backend = multi_backend_from_backend(_backend);
-	return backend->session;
-}
-
-static clockid_t multi_backend_get_presentation_clock(
-		struct wlr_backend *backend) {
-	struct wlr_multi_backend *multi = multi_backend_from_backend(backend);
-
-	struct subbackend_state *sub;
-	wl_list_for_each(sub, &multi->backends, link) {
-		if (sub->backend->impl->get_presentation_clock) {
-			return wlr_backend_get_presentation_clock(sub->backend);
-		}
-	}
-
-	return CLOCK_MONOTONIC;
-}
-
 static int multi_backend_get_drm_fd(struct wlr_backend *backend) {
 	struct wlr_multi_backend *multi = multi_backend_from_backend(backend);
 
@@ -122,8 +101,6 @@ static uint32_t multi_backend_get_buffer_caps(struct wlr_backend *backend) {
 static const struct wlr_backend_impl backend_impl = {
 	.start = multi_backend_start,
 	.destroy = multi_backend_destroy,
-	.get_session = multi_backend_get_session,
-	.get_presentation_clock = multi_backend_get_presentation_clock,
 	.get_drm_fd = multi_backend_get_drm_fd,
 	.get_buffer_caps = multi_backend_get_buffer_caps,
 };
@@ -135,8 +112,7 @@ static void handle_display_destroy(struct wl_listener *listener, void *data) {
 }
 
 struct wlr_backend *wlr_multi_backend_create(struct wl_display *display) {
-	struct wlr_multi_backend *backend =
-		calloc(1, sizeof(struct wlr_multi_backend));
+	struct wlr_multi_backend *backend = calloc(1, sizeof(*backend));
 	if (!backend) {
 		wlr_log(WLR_ERROR, "Backend allocation failed");
 		return NULL;
@@ -161,13 +137,13 @@ bool wlr_backend_is_multi(struct wlr_backend *b) {
 static void new_input_reemit(struct wl_listener *listener, void *data) {
 	struct subbackend_state *state = wl_container_of(listener,
 			state, new_input);
-	wlr_signal_emit_safe(&state->container->events.new_input, data);
+	wl_signal_emit_mutable(&state->container->events.new_input, data);
 }
 
 static void new_output_reemit(struct wl_listener *listener, void *data) {
 	struct subbackend_state *state = wl_container_of(listener,
 			state, new_output);
-	wlr_signal_emit_safe(&state->container->events.new_output, data);
+	wl_signal_emit_mutable(&state->container->events.new_output, data);
 }
 
 static void handle_subbackend_destroy(struct wl_listener *listener,
@@ -199,7 +175,7 @@ bool wlr_multi_backend_add(struct wlr_backend *_multi,
 		return true;
 	}
 
-	struct subbackend_state *sub = calloc(1, sizeof(struct subbackend_state));
+	struct subbackend_state *sub = calloc(1, sizeof(*sub));
 	if (sub == NULL) {
 		wlr_log(WLR_ERROR, "Could not add backend: allocation failed");
 		return false;
@@ -218,7 +194,7 @@ bool wlr_multi_backend_add(struct wlr_backend *_multi,
 	wl_signal_add(&backend->events.new_output, &sub->new_output);
 	sub->new_output.notify = new_output_reemit;
 
-	wlr_signal_emit_safe(&multi->events.backend_add, backend);
+	wl_signal_emit_mutable(&multi->events.backend_add, backend);
 	return true;
 }
 
@@ -230,7 +206,7 @@ void wlr_multi_backend_remove(struct wlr_backend *_multi,
 		multi_backend_get_subbackend(multi, backend);
 
 	if (sub) {
-		wlr_signal_emit_safe(&multi->events.backend_remove, backend);
+		wl_signal_emit_mutable(&multi->events.backend_remove, backend);
 		subbackend_state_destroy(sub);
 	}
 }

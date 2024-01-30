@@ -7,7 +7,6 @@
 #include <wayland-server-protocol.h>
 #include <xkbcommon/xkbcommon.h>
 #include "types/wlr_keyboard.h"
-#include "util/signal.h"
 #include "wlr/interfaces/wlr_keyboard.h"
 #include "wlr/types/wlr_keyboard.h"
 #include "wlr/types/wlr_keyboard_group.h"
@@ -20,13 +19,13 @@ struct keyboard_group_device {
 	struct wl_listener keymap;
 	struct wl_listener repeat_info;
 	struct wl_listener destroy;
-	struct wl_list link; // wlr_keyboard_group::devices
+	struct wl_list link; // wlr_keyboard_group.devices
 };
 
 struct keyboard_group_key {
 	uint32_t keycode;
 	size_t count;
-	struct wl_list link; // wlr_keyboard_group::keys
+	struct wl_list link; // wlr_keyboard_group.keys
 };
 
 static void keyboard_set_leds(struct wlr_keyboard *kb, uint32_t leds) {
@@ -43,8 +42,7 @@ static const struct wlr_keyboard_impl impl = {
 };
 
 struct wlr_keyboard_group *wlr_keyboard_group_create(void) {
-	struct wlr_keyboard_group *group =
-		calloc(1, sizeof(struct wlr_keyboard_group));
+	struct wlr_keyboard_group *group = calloc(1, sizeof(*group));
 	if (!group) {
 		wlr_log(WLR_ERROR, "Failed to allocate wlr_keyboard_group");
 		return NULL;
@@ -65,7 +63,8 @@ struct wlr_keyboard_group *wlr_keyboard_group_from_wlr_keyboard(
 	if (keyboard->impl != &impl) {
 		return NULL;
 	}
-	return (struct wlr_keyboard_group *)keyboard;
+	struct wlr_keyboard_group *group = wl_container_of(keyboard, group, keyboard);
+	return group;
 }
 
 static bool process_key(struct keyboard_group_device *group_device,
@@ -93,8 +92,7 @@ static bool process_key(struct keyboard_group_device *group_device,
 	}
 
 	if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
-		struct keyboard_group_key *key =
-			calloc(1, sizeof(struct keyboard_group_key));
+		struct keyboard_group_key *key = calloc(1, sizeof(*key));
 		if (!key) {
 			wlr_log(WLR_ERROR, "Failed to allocate keyboard_group_key");
 			return false;
@@ -212,9 +210,9 @@ static void refresh_state(struct keyboard_group_device *device,
 	// If there are any unique keys, emit the enter/leave event
 	if (keys.size > 0) {
 		if (state == WL_KEYBOARD_KEY_STATE_PRESSED) {
-			wlr_signal_emit_safe(&device->keyboard->group->events.enter, &keys);
+			wl_signal_emit_mutable(&device->keyboard->group->events.enter, &keys);
 		} else {
-			wlr_signal_emit_safe(&device->keyboard->group->events.leave, &keys);
+			wl_signal_emit_mutable(&device->keyboard->group->events.leave, &keys);
 		}
 	}
 
@@ -256,8 +254,7 @@ bool wlr_keyboard_group_add_keyboard(struct wlr_keyboard_group *group,
 		return false;
 	}
 
-	struct keyboard_group_device *device =
-		calloc(1, sizeof(struct keyboard_group_device));
+	struct keyboard_group_device *device = calloc(1, sizeof(*device));
 	if (!device) {
 		wlr_log(WLR_ERROR, "Failed to allocate keyboard_group_device");
 		return false;
